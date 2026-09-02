@@ -17,10 +17,26 @@ from app.agent.customer_support_agent.prompts import CUSTOMER_SUPPORT_SYSTEM_PRO
 from app.agent.customer_support_agent.tools import CUSTOMER_SUPPORT_TOOLS
 
 
+# Fitting a whole look to a budget takes a few passes - browse, price, swap the
+# piece that broke the budget, price again - so this agent gets more headroom
+# than the six steps a single lookup needs.
+OUTFIT_MAX_ITERATIONS = 10
+
+# This agent faces the open storefront, so a runaway answer is a runaway bill.
+# A full outfit with its bullets fits comfortably in a few hundred tokens.
+MAX_REPLY_TOKENS = 500
+
+
 @lru_cache(maxsize=1)
 def get_customer_support_agent_executor() -> AgentExecutor:
     # Slightly warmer than the admin agent: this one is talking to shoppers.
-    return build_agent_executor(CUSTOMER_SUPPORT_SYSTEM_PROMPT, CUSTOMER_SUPPORT_TOOLS, temperature=0.3)
+    return build_agent_executor(
+        CUSTOMER_SUPPORT_SYSTEM_PROMPT,
+        CUSTOMER_SUPPORT_TOOLS,
+        temperature=0.3,
+        max_iterations=OUTFIT_MAX_ITERATIONS,
+        max_tokens=MAX_REPLY_TOKENS,
+    )
 
 
 async def run_customer_support_agent(message: str, history: ChatHistory) -> str:

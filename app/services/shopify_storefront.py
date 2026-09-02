@@ -13,7 +13,7 @@ projected down to what a shopper may see:
 
 import logging
 
-from app.services.shopify_client import ShopifyError, graphql
+from app.services.shopify_client import ShopifyError, graphql, store_domain
 
 logger = logging.getLogger(__name__)
 
@@ -35,19 +35,23 @@ PRODUCT_SEARCH = """
 query SupportProductSearch($query: String!, $first: Int!, $variants: Int!) {
   products(first: $first, query: $query, sortKey: RELEVANCE) {
     nodes {
+      legacyResourceId
       title
       handle
       productType
       onlineStoreUrl
       totalInventory
+      featuredMedia { ... on MediaImage { image { url altText } } }
       variants(first: $variants) {
         nodes {
+          legacyResourceId
           sku
           title
           price
           compareAtPrice
           availableForSale
           inventoryQuantity
+          media(first: 1) { nodes { ... on MediaImage { image { url } } } }
         }
       }
     }
@@ -61,6 +65,7 @@ query SupportOrderStatus($query: String!) {
     nodes {
       name
       email
+      statusPageUrl
       createdAt
       cancelledAt
       displayFulfillmentStatus
@@ -102,21 +107,49 @@ async def shop_info() -> dict:
     return _shop_cache
 
 
+def product_image(node: dict) -> str | None:
+    """The product's featured image, if it has one."""
+    media = node.get("featuredMedia") or {}
+    return (media.get("image") or {}).get("url")
+
+
+def variant_image(variant: dict) -> str | None:
+    """A variant's own photo - the pink shoe rather than the navy one."""
+    nodes = (variant.get("media") or {}).get("nodes") or []
+    for item in nodes:
+        url = (item.get("image") or {}).get("url")
+        if url:
+            return url
+    return None
+
+
+def product_url(node: dict, variant_id: str | None = None) -> str:
+    """A storefront link. onlineStoreUrl is null while the store is password
+    protected, so fall back to the canonical /products/<handle> path, and point
+    at the exact variant when one was chosen."""
+    url = node.get("onlineStoreUrl") or f"https://{store_domain()}/products/{node['handle']}"
+    return f"{url}?variant={variant_id}" if variant_id else url
+
+
 def _availability(variants: list[dict]) -> str:
     if any(v["availableForSale"] for v in variants):
         return "in_stock"
     return "out_of_stock"
 
 
-def _public_variant(v: dict) -> dict:
+def _public_variant(v: dict, node: dict) -> dict:
     quantity = v.get("inventoryQuantity") or 0
+    variant_id = v.get("legacyResourceId")
     return {
+        "variant_id": variant_id,
         "sku": v.get("sku") or None,
         "option": None if v["title"] == "Default Title" else v["title"],
         "price": v["price"],
         "was_price": v.get("compareAtPrice"),
         "available": bool(v["availableForSale"]),
         "units_available": max(quantity, 0),
+        "image": variant_image(v) or product_image(node),
+        "url": product_url(node, variant_id),
     }
 
 
@@ -124,14 +157,16 @@ def _public_product(node: dict, currency: str) -> dict:
     variants = node["variants"]["nodes"]
     prices = [float(v["price"]) for v in variants if v.get("price") is not None]
     return {
+        "product_id": node.get("legacyResourceId"),
         "title": node["title"],
         "category": node.get("productType") or None,
-        "url": node.get("onlineStoreUrl"),
+        "url": product_url(node),
+        "image": product_image(node),
         "currency": currency,
         "price_from": round(min(prices), 2) if prices else None,
         "price_to": round(max(prices), 2) if prices else None,
         "availability": _availability(variants),
-        "variants": [_public_variant(v) for v in variants],
+        "variants": [_public_variant(v, node) for v in variants],
     }
 
 
@@ -166,7 +201,9 @@ async def find_order(order_number: str, email: str) -> dict:
     """Look one order up by number, released only when the email on it matches.
 
     A wrong email returns the same ``found: False`` as an order that does not
-    exist, so this cannot be used to probe which order numbers are real.
+    exist, so this cannot be used to probe which order numbers are real. Only on
+    a match does the response carry ``status_page_url`` - Shopify's tokenised
+    order page, which anyone holding the link can open.
     """
     given_email = email.strip().casefold()
     if not given_email or "@" not in given_email:
@@ -209,7 +246,11 @@ async def find_order(order_number: str, email: str) -> dict:
         ],
         "tracking": tracking,
         "estimated_delivery": estimated,
+        # Shopify's tokenised order page: the token IS the authentication, so it
+        # is only ever returned on this branch, where the email already matched.
+        "status_page_url": node.get("statusPageUrl"),
     }
 
 
-__all__ = ["ShopifyError", "find_order", "search_products", "shop_info"]
+__all__ = ["ShopifyError", "find_order", "product_image", "product_url",
+           "search_products", "shop_info", "variant_image"]

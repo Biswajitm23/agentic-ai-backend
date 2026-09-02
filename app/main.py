@@ -12,7 +12,7 @@ from app.db.base import Base
 from app.db.migrate import ensure_columns, ensure_vector_index
 from app.db.seed import seed_if_empty
 from app.db.session import AsyncSessionLocal, engine
-from app.services import insights, rag, shopify_sync
+from app.services import handbook, insights, rag, shopify_sync
 
 
 logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
@@ -65,6 +65,14 @@ async def lifespan(app: FastAPI):
                 await rag.rebuild_store_knowledge(session, await insights.currency(session))
         except Exception:
             logger.exception("Could not build the retrieval index")
+    # The store handbook is versioned with the code, so re-embed it whenever the
+    # file has changed. Unchanged, this costs one hash and no embeddings.
+    try:
+        async with AsyncSessionLocal() as session:
+            logger.info("Handbook index: %s", await handbook.reindex(session))
+    except Exception:
+        logger.exception("Could not index the store handbook")
+
     logger.info(
         "Retrieval backend: %s (%s)",
         "pgvector" if settings.is_postgres else "SQLite JSON fallback",

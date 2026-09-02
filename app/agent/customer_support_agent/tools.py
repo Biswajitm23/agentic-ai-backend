@@ -1,10 +1,12 @@
-"""Tools for the customer support agent — live reads from the Shopify store.
+"""Tools for the customer support agent.
 
-Each tool wraps one fixed GraphQL operation in ``services.shopify_storefront``.
-The agent supplies a search term, an order number or an email; it never composes
-a query, so a shopper cannot steer what is asked of the Admin API. Failures come
-back as a plain message the agent can relay instead of raising, so a Shopify
-outage degrades into an apology rather than a broken conversation.
+Live store data comes from fixed GraphQL operations in ``shopify_storefront`` and
+``outfit``; how the store itself works - paths, collections, policies - comes from
+the handbook index in ``handbook``. The agent supplies a search term, an order
+number, an email or a question; it never composes a query, so a shopper cannot
+steer what is asked of the Admin API. Failures come back as a plain message the
+agent can relay instead of raising, so an outage degrades into an apology rather
+than a broken conversation.
 """
 
 import json
@@ -12,8 +14,8 @@ import logging
 
 from langchain_core.tools import tool
 
-from app.agent.customer_support_agent.store_info import STORE_POLICIES
-from app.services import shopify_storefront
+from app.db.session import AsyncSessionLocal
+from app.services import handbook, outfit, shopify_storefront
 from app.services.shopify_client import ShopifyError
 
 logger = logging.getLogger(__name__)
@@ -31,12 +33,10 @@ def _fail(where: str, exc: Exception) -> str:
 
 @tool
 async def search_products(query: str) -> str:
-    """Search the store's live catalogue for products a shopper can actually buy.
+    """Search the live catalogue for one thing a shopper named.
 
-    Pass a short search term such as "hairband", "shoes" or a product name. Pass an
-    empty string to see what the store sells. Returns title, price range, currency,
-    stock availability and the product page URL for up to 10 products. Only products
-    that are live on the storefront are returned.
+    query: a short term like "hairband" or a product name; empty lists what is sold.
+    Returns up to 10 buyable products with price, currency and stock.
     """
     try:
         return json.dumps(await shopify_storefront.search_products(query), ensure_ascii=False)
@@ -46,12 +46,10 @@ async def search_products(query: str) -> str:
 
 @tool
 async def check_order_status(order_number: str, email: str) -> str:
-    """Look up ONE order and get its status, items, total and tracking.
+    """Look up ONE order: status, items, total, tracking.
 
-    Needs BOTH the order number (for example "#1027" or "1027") and the email
-    address the order was placed with - the order is only released when the email
-    matches. If either is missing, ask the shopper for it; never guess an email.
-    Returns found=false when the number and email do not match an order.
+    Needs BOTH the order number ("#1027" or "1027") and the email on the order;
+    it is released only when they match. found=false means they did not.
     """
     try:
         return json.dumps(
@@ -63,7 +61,7 @@ async def check_order_status(order_number: str, email: str) -> str:
 
 @tool
 async def get_store_info() -> str:
-    """Get the store's name, the currency prices are shown in, and its contact email."""
+    """Store name, currency and contact email."""
     try:
         return json.dumps(await shopify_storefront.shop_info(), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
@@ -72,13 +70,73 @@ async def get_store_info() -> str:
 
 @tool
 async def get_store_policies() -> str:
-    """Get the store's shipping, delivery, returns, refund, payment and contact policies."""
-    return json.dumps(STORE_POLICIES, ensure_ascii=False)
+    """Shipping, delivery, returns, refunds and contact details, from the store handbook.
+
+    Read the result carefully: anything still marked with an empty box has not been
+    decided yet, and must NOT be guessed at - offer a human instead.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            found = await handbook.search(db, "refund return shipping delivery policy terms", limit=4)
+        return json.dumps({"handbook": found}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001 - a retrieval failure must not break the chat
+        return _fail("get_store_policies", exc)
+
+
+@tool
+async def search_store_handbook(question: str) -> str:
+    """Look up how this store works: account pages, collections, cart and checkout paths, policies.
+
+    Use for "where do I find...", "how do I return...", "do you have a size guide" - anything
+    about the store itself rather than a product or an order. Passages come from the store's
+    own handbook. Items marked with a warning sign are unconfirmed and items marked with an
+    empty box are not filled in yet: never state either as fact, and never send a link you
+    were not given verbatim.
+    """
+    try:
+        async with AsyncSessionLocal() as db:
+            return json.dumps({"passages": await handbook.search(db, question, limit=4)}, ensure_ascii=False)
+    except Exception as exc:  # noqa: BLE001
+        return _fail("search_store_handbook", exc)
+
+
+
+@tool
+async def browse_catalogue() -> str:
+    """Everything buyable right now, by category - use before build_outfit.
+
+    For an outfit, gift or occasion rather than one named product. Returns each
+    product's handle, category, price, colours, sizes, and the store currency.
+    """
+    try:
+        return json.dumps(await outfit.browse_catalogue(), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("browse_catalogue", exc)
+
+
+@tool
+async def build_outfit(items: str | list, budget: float = 0) -> str:
+    """Price a look exactly and get its variant ids. Never add prices up yourself.
+
+    items: JSON array using handles/colours/sizes from browse_catalogue, e.g.
+      [{"handle": "gingham-dress", "color": "Pink", "size": "5Y", "quantity": 1}]
+    Omit color/size where the product has none. budget: 0 if not given.
+    Returns total, within_budget, cart_items (variant ids for the storefront), and
+    problems listing the colours/sizes that do exist so you can swap and retry.
+    """
+    try:
+        result = await outfit.build_outfit(items, budget or None)
+        return json.dumps(result, ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("build_outfit", exc)
 
 
 CUSTOMER_SUPPORT_TOOLS = [
     search_products,
+    browse_catalogue,
+    build_outfit,
     check_order_status,
     get_store_info,
     get_store_policies,
+    search_store_handbook,
 ]

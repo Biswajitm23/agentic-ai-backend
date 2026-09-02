@@ -25,7 +25,9 @@ logger = logging.getLogger(__name__)
 
 router = APIRouter(tags=["support"])
 
-HISTORY_LIMIT = 20
+# Every stored turn is replayed on every step of the next turn, so this stays
+# small: a shopper's thread rarely needs more than the last few exchanges.
+HISTORY_LIMIT = 8
 # Support conversations share the chat_messages table with the admin chat, so
 # they carry their own session-id prefix and only ever load their own history.
 SESSION_PREFIX = "cs_"
@@ -35,6 +37,61 @@ SSE_HEADERS = {
     "Connection": "keep-alive",
     "X-Accel-Buffering": "no",  # stop nginx buffering the stream
 }
+
+
+# Tools whose result the storefront wants to render as cards, not just prose.
+CARD_EVENTS = {
+    "search_products": "products",
+    "browse_catalogue": "products",
+    "build_outfit": "outfit",
+}
+MAX_CARDS = 12
+
+
+def _card(item: dict) -> dict:
+    """The fields a storefront needs to draw a product and link to it."""
+    return {
+        "product_id": item.get("product_id"),
+        "variant_id": item.get("variant_id"),
+        "title": item.get("title"),
+        "option": item.get("option"),
+        "price": item.get("unit_price", item.get("price_from")),
+        "image": item.get("image"),
+        "url": item.get("url"),
+    }
+
+
+def _cards_from(tool_name: str, output: str | None) -> dict | None:
+    """Pull renderable product cards out of a tool result, or None if there are none."""
+    if not output:
+        return None
+    try:
+        data = json.loads(output)
+    except (TypeError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("error"):
+        return None
+
+    if tool_name == "build_outfit":
+        items = data.get("outfit") or []
+        if not items:
+            return None
+        return {
+            "items": [_card(i) for i in items[:MAX_CARDS]],
+            "currency": data.get("currency"),
+            "total": data.get("total"),
+            "budget": data.get("budget"),
+            "within_budget": data.get("within_budget"),
+            "cart_items": data.get("cart_items") or [],
+        }
+
+    items = data.get("products") or []
+    if not items:
+        return None
+    return {
+        "items": [_card(i) for i in items[:MAX_CARDS]],
+        "currency": data.get("currency"),
+    }
 
 
 class SupportChatRequest(BaseModel):
@@ -87,6 +144,12 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
       reset   - {}                               clear the reply shown so far; the agent
                                                  was thinking out loud before a lookup
       tool    - {"name", "phase"}                the agent is looking something up
+      products- {items[], currency}               product cards to render: each has
+                                                 product_id, variant_id, title, option,
+                                                 price, image and url
+      outfit  - {items[], currency, total,        a complete look: the same cards plus
+                 budget, within_budget,           the exact total and the variants to
+                 cart_items[]}                    add to the bag
       done    - {"session_id", "reply"}          the finished reply
       error   - {"message"}                      the turn failed; nothing was saved
     """
@@ -104,6 +167,10 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                     yield _sse("reset", {})
                 elif event["type"] == "tool":
                     yield _sse("tool", {"name": event["name"], "phase": event["phase"]})
+                    if event["phase"] == "end" and event["name"] in CARD_EVENTS:
+                        cards = _cards_from(event["name"], event.get("output"))
+                        if cards:
+                            yield _sse(CARD_EVENTS[event["name"]], cards)
                 elif event["type"] == "final":
                     reply = event["reply"]
         except Exception:

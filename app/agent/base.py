@@ -26,7 +26,8 @@ ChatHistory = list[tuple[str, str]]
 # One streamed step of a turn. 'type' is:
 #   token  -> {"text": str}            a piece of the reply as the model writes it
 #   reset  -> {}                       drop the tokens shown so far (see below)
-#   tool   -> {"name": str, "phase": "start"|"end"}   a tool call starting/finishing
+#   tool   -> {"name": str, "phase": "start"|"end", "output": str|None}
+#                                      a tool call starting/finishing; output on end
 #   final  -> {"reply": str}           the complete reply, emitted once at the end
 AgentEvent = dict[str, Any]
 
@@ -49,13 +50,14 @@ class Agent:
     remember: AgentRemember | None = None
 
 
-def build_llm(temperature: float = 0.2) -> ChatOpenAI:
+def build_llm(temperature: float = 0.2, max_tokens: int | None = None) -> ChatOpenAI:
     """The shared DeepSeek (OpenAI-compatible) chat model."""
     return ChatOpenAI(
         model=settings.DEEPSEEK_MODEL,
         api_key=settings.DEEPSEEK_API_KEY,
         base_url=settings.DEEPSEEK_BASE_URL,
         temperature=temperature,
+        max_tokens=max_tokens,
     )
 
 
@@ -64,6 +66,7 @@ def build_agent_executor(
     tools: Sequence[BaseTool],
     temperature: float = 0.2,
     max_iterations: int = MAX_ITERATIONS,
+    max_tokens: int | None = None,
 ) -> AgentExecutor:
     """Build a tool-calling agent executor from a system prompt and a tool set."""
     prompt = ChatPromptTemplate.from_messages(
@@ -74,7 +77,7 @@ def build_agent_executor(
             MessagesPlaceholder("agent_scratchpad"),
         ]
     )
-    llm = build_llm(temperature)
+    llm = build_llm(temperature, max_tokens)
     agent = create_tool_calling_agent(llm, list(tools), prompt)
     return AgentExecutor(agent=agent, tools=list(tools), max_iterations=max_iterations)
 
@@ -107,6 +110,14 @@ def _chunk_text(chunk: Any) -> str:
     return "".join(parts)
 
 
+def _tool_output_text(output: Any) -> str | None:
+    """A tool's return value as text, whether it came back raw or as a message."""
+    if output is None:
+        return None
+    content = getattr(output, "content", output)
+    return content if isinstance(content, str) else None
+
+
 async def stream_executor(
     executor: AgentExecutor, message: str, history: ChatHistory
 ) -> AsyncIterator[AgentEvent]:
@@ -135,7 +146,14 @@ async def stream_executor(
             yield {"type": "reset"}
             yield {"type": "tool", "name": event["name"], "phase": "start"}
         elif kind == "on_tool_end":
-            yield {"type": "tool", "name": event["name"], "phase": "end"}
+            # Carry the tool's result too: a caller may want the structured data
+            # behind the answer (product cards, for instance), not just the prose.
+            yield {
+                "type": "tool",
+                "name": event["name"],
+                "phase": "end",
+                "output": _tool_output_text(event["data"].get("output")),
+            }
         elif kind == "on_chain_end" and event.get("name") == "AgentExecutor":
             output = event["data"].get("output")
             if isinstance(output, dict) and isinstance(output.get("output"), str):

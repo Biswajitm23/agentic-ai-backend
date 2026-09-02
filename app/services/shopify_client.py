@@ -25,9 +25,13 @@ def is_configured() -> bool:
     return bool(settings.SHOPIFY_STORE_URL and settings.SHOPIFY_ACCESS_TOKEN)
 
 
+def store_domain() -> str:
+    """The bare myshopify host, e.g. "palashstor.myshopify.com"."""
+    return settings.SHOPIFY_STORE_URL.removeprefix("https://").removeprefix("http://").strip("/")
+
+
 def graphql_url() -> str:
-    host = settings.SHOPIFY_STORE_URL.removeprefix("https://").removeprefix("http://").strip("/")
-    return f"https://{host}/admin/api/{settings.SHOPIFY_API_VERSION}/graphql.json"
+    return f"https://{store_domain()}/admin/api/{settings.SHOPIFY_API_VERSION}/graphql.json"
 
 
 async def graphql(query: str, variables: dict | None = None, client: httpx.AsyncClient | None = None) -> dict:
