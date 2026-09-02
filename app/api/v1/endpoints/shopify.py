@@ -5,7 +5,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
 from app.db.session import get_db
-from app.services import shopify_sync
+from app.services import insights, shopify_sync
 
 logger = logging.getLogger(__name__)
 
@@ -13,10 +13,15 @@ router = APIRouter(tags=["shopify"])
 
 
 @router.get("/shopify/status")
-async def shopify_status() -> dict:
+async def shopify_status(db: AsyncSession = Depends(get_db)) -> dict:
+    """Connection state plus what the last sync learned about the store
+    (currency, granted scopes, where campaign data comes from)."""
+    meta = await insights.store_meta(db)
     return {
         "configured": shopify_sync.is_configured(),
         "store_url": settings.SHOPIFY_STORE_URL or None,
+        "api_version": settings.SHOPIFY_API_VERSION,
+        **meta,
     }
 
 

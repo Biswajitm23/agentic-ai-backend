@@ -11,16 +11,70 @@ router = APIRouter(tags=["dashboard"])
 @router.get("/dashboard/summary")
 async def dashboard_summary(db: AsyncSession = Depends(get_db)) -> dict:
     """Headline KPIs for all four domains, shown in the top section of the dashboard."""
-    inventory = await insights.inventory_summary(db)
-    marketing = await insights.marketing_summary(db)
-    operations = await insights.operations_summary(db)
-    finance = await insights.finance_summary(db)
+    s = await insights.all_summaries(db)
+    inventory, marketing, operations, finance = s["inventory"], s["marketing"], s["operations"], s["finance"]
     return {
-        "inventory": {k: inventory[k] for k in ("total_skus", "total_units", "stock_value", "low_stock_count")},
-        "marketing": {k: marketing[k] for k in ("active_campaigns", "total_spend", "total_revenue", "roas")},
-        "operations": {k: operations[k] for k in ("total_orders", "pending_orders", "open_tasks", "high_priority_tasks")},
-        "finance": {k: finance[k] for k in ("total_revenue", "total_expenses", "net_profit", "profit_margin_pct")},
+        "meta": await insights.store_meta(db),
+        "inventory": {
+            k: inventory[k]
+            for k in ("total_skus", "total_units", "stock_value", "retail_value", "low_stock_count", "out_of_stock_count", "missing_cost_count")
+        },
+        "marketing": {
+            k: marketing[k]
+            for k in (
+                "total_campaigns",
+                "active_campaigns",
+                "total_spend",
+                "total_revenue",
+                "total_conversions",
+                "roas",
+                "attribution_rate_pct",
+                "campaign_source",
+            )
+        },
+        "operations": {
+            k: operations[k]
+            for k in (
+                "total_orders",
+                "pending_orders",
+                "pending_value",
+                "fulfillment_rate_pct",
+                "orders_last_30d",
+                "revenue_last_30d",
+                "open_tasks",
+                "high_priority_tasks",
+                "overdue_tasks",
+            )
+        },
+        "finance": {
+            k: finance[k]
+            for k in (
+                "total_revenue",
+                "net_sales",
+                "cogs",
+                "gross_profit",
+                "gross_margin_pct",
+                "total_expenses",
+                "net_profit",
+                "profit_margin_pct",
+                "unpaid_orders",
+                "refunds",
+            )
+        },
+        "health": insights.derive_health_score(s),
     }
+
+
+@router.get("/dashboard/priority-actions")
+async def dashboard_priority_actions(db: AsyncSession = Depends(get_db)) -> dict:
+    """Ranked, explainable actions across all four domains."""
+    return await insights.priority_actions(db)
+
+
+@router.get("/dashboard/health")
+async def dashboard_health(db: AsyncSession = Depends(get_db)) -> dict:
+    """The business health scoreboard: per-domain and overall scores with their components."""
+    return await insights.health_score(db)
 
 
 @router.get("/analysis/{domain}")

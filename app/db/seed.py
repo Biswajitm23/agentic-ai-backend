@@ -39,15 +39,20 @@ def _seed_store_data(session: AsyncSession) -> None:
 
 
 async def seed_if_empty(session: AsyncSession, include_store_data: bool = True) -> None:
-    """Seed demo data. When Shopify is connected, products and orders come from the
-    store instead, so include_store_data=False seeds only the domains Shopify lacks
-    (campaigns, tasks, expenses)."""
+    """Seed demo data for a database with no store connected.
+
+    When Shopify is connected (``include_store_data=False``) nothing is seeded:
+    products, orders, campaigns, expenses and tasks are all filled from the store
+    by ``shopify_sync``, so demo rows would only make the dashboard inaccurate.
+    """
+    if not include_store_data:
+        return
     count = (await session.execute(select(func.count(Campaign.id)))).scalar_one()
-    if count:
+    products = (await session.execute(select(func.count(Product.id)))).scalar_one()
+    if count or products:
         return
 
-    if include_store_data:
-        _seed_store_data(session)
+    _seed_store_data(session)
 
     session.add_all(
         [

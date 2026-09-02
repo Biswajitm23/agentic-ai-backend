@@ -45,6 +45,17 @@ class Settings(BaseSettings):
     SHOPIFY_ACCESS_TOKEN: str = ""
     SHOPIFY_API_VERSION: str = "2024-10"
 
+    # Embeddings for the admin agent's RAG memory (pgvector). Any OpenAI-compatible
+    # /embeddings endpoint works; with no key set a deterministic local hashing
+    # embedder is used so retrieval still works in development.
+    EMBEDDING_PROVIDER: str = "auto"  # auto | openai | local
+    EMBEDDING_API_KEY: str = ""
+    EMBEDDING_BASE_URL: str = "https://api.openai.com/v1"
+    EMBEDDING_MODEL: str = "text-embedding-3-small"
+    EMBEDDING_DIMENSIONS: int = 1536
+    RAG_STORE_RESULTS: int = 6
+    RAG_MEMORY_RESULTS: int = 4
+
     @property
     def async_database_url(self) -> str:
         """The DATABASE_URL with an async driver, ready for create_async_engine."""
@@ -53,6 +64,12 @@ class Settings(BaseSettings):
     @property
     def is_postgres(self) -> bool:
         return self.async_database_url.startswith("postgresql")
+
+    @property
+    def embedding_provider(self) -> str:
+        if self.EMBEDDING_PROVIDER == "auto":
+            return "openai" if self.EMBEDDING_API_KEY else "local"
+        return self.EMBEDDING_PROVIDER
 
 
 settings = Settings()

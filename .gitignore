@@ -6,3 +6,4 @@ venv/
 !.env.example
 *.db
 .DS_Store
+.a5c/

@@ -9,11 +9,13 @@ from app.api.v1.router import api_router
 from app.core.config import settings
 from app.db import models  # noqa: F401  (register models on Base.metadata)
 from app.db.base import Base
+from app.db.migrate import ensure_columns, ensure_vector_index
 from app.db.seed import seed_if_empty
 from app.db.session import AsyncSessionLocal, engine
-from app.services import shopify_sync
+from app.services import insights, rag, shopify_sync
 
 
+logging.basicConfig(level=logging.INFO, format="%(levelname)s %(name)s: %(message)s")
 logger = logging.getLogger(__name__)
 
 
@@ -39,15 +41,35 @@ async def lifespan(app: FastAPI):
         await enable_pgvector()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
+        await ensure_columns(conn)
+        await ensure_vector_index(conn)
+
+    connected = shopify_sync.is_configured()
     async with AsyncSessionLocal() as session:
-        await seed_if_empty(session, include_store_data=not shopify_sync.is_configured())
-    if shopify_sync.is_configured():
+        await seed_if_empty(session, include_store_data=not connected)
+
+    synced = False
+    if connected:
         try:
             async with AsyncSessionLocal() as session:
                 result = await shopify_sync.sync_shopify(session)
                 logger.info("Shopify sync on startup: %s", result)
+                synced = True
         except Exception:
-            logger.exception("Shopify sync on startup failed; using local data")
+            logger.exception("Shopify sync on startup failed; using the data already in the database")
+    if not synced:
+        # The sync rebuilds the retrieval index itself; otherwise make sure the
+        # agent can search whatever is in the database.
+        try:
+            async with AsyncSessionLocal() as session:
+                await rag.rebuild_store_knowledge(session, await insights.currency(session))
+        except Exception:
+            logger.exception("Could not build the retrieval index")
+    logger.info(
+        "Retrieval backend: %s (%s)",
+        "pgvector" if settings.is_postgres else "SQLite JSON fallback",
+        settings.embedding_provider,
+    )
     yield
 
 
