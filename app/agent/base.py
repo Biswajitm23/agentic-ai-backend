@@ -93,7 +93,16 @@ def to_messages(history: ChatHistory) -> list[BaseMessage]:
 async def run_executor(executor: AgentExecutor, message: str, history: ChatHistory) -> str:
     """Run one turn against an executor and return the agent's reply text."""
     result = await executor.ainvoke({"input": message, "chat_history": to_messages(history)})
-    return result["output"]
+    return plain_dashes(result["output"])
+
+
+# Models reach for em and en dashes constantly; the store wants plain punctuation.
+_DASHES = str.maketrans({"—": "-", "–": "-"})
+
+
+def plain_dashes(text: str) -> str:
+    """Replace em and en dashes with a plain hyphen."""
+    return text.translate(_DASHES)
 
 
 def _chunk_text(chunk: Any) -> str:
@@ -137,7 +146,7 @@ async def stream_executor(
     ):
         kind = event["event"]
         if kind == "on_chat_model_stream":
-            text = _chunk_text(event["data"].get("chunk"))
+            text = plain_dashes(_chunk_text(event["data"].get("chunk")))
             if text:
                 tokens.append(text)
                 yield {"type": "token", "text": text}
@@ -159,4 +168,4 @@ async def stream_executor(
             if isinstance(output, dict) and isinstance(output.get("output"), str):
                 final = output["output"]
 
-    yield {"type": "final", "reply": final or "".join(tokens)}
+    yield {"type": "final", "reply": plain_dashes(final or "".join(tokens))}

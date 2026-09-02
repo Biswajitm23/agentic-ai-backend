@@ -18,6 +18,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.agent.customer_support_agent import CUSTOMER_SUPPORT_AGENT
+from app.api.v1.cards import CardCollector
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
 
@@ -38,60 +39,6 @@ SSE_HEADERS = {
     "X-Accel-Buffering": "no",  # stop nginx buffering the stream
 }
 
-
-# Tools whose result the storefront wants to render as cards, not just prose.
-CARD_EVENTS = {
-    "search_products": "products",
-    "browse_catalogue": "products",
-    "build_outfit": "outfit",
-}
-MAX_CARDS = 12
-
-
-def _card(item: dict) -> dict:
-    """The fields a storefront needs to draw a product and link to it."""
-    return {
-        "product_id": item.get("product_id"),
-        "variant_id": item.get("variant_id"),
-        "title": item.get("title"),
-        "option": item.get("option"),
-        "price": item.get("unit_price", item.get("price_from")),
-        "image": item.get("image"),
-        "url": item.get("url"),
-    }
-
-
-def _cards_from(tool_name: str, output: str | None) -> dict | None:
-    """Pull renderable product cards out of a tool result, or None if there are none."""
-    if not output:
-        return None
-    try:
-        data = json.loads(output)
-    except (TypeError, ValueError):
-        return None
-    if not isinstance(data, dict) or data.get("error"):
-        return None
-
-    if tool_name == "build_outfit":
-        items = data.get("outfit") or []
-        if not items:
-            return None
-        return {
-            "items": [_card(i) for i in items[:MAX_CARDS]],
-            "currency": data.get("currency"),
-            "total": data.get("total"),
-            "budget": data.get("budget"),
-            "within_budget": data.get("within_budget"),
-            "cart_items": data.get("cart_items") or [],
-        }
-
-    items = data.get("products") or []
-    if not items:
-        return None
-    return {
-        "items": [_card(i) for i in items[:MAX_CARDS]],
-        "currency": data.get("currency"),
-    }
 
 
 class SupportChatRequest(BaseModel):
@@ -150,7 +97,8 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
       outfit  - {items[], currency, total,        a complete look: the same cards plus
                  budget, within_budget,           the exact total and the variants to
                  cart_items[]}                    add to the bag
-      done    - {"session_id", "reply"}          the finished reply
+      done    - {"session_id", "reply",          the finished reply, repeating
+                 products?, outfit?}             whatever cards were produced
       error   - {"message"}                      the turn failed; nothing was saved
     """
     session_id = _resolve_session(req.session_id)
@@ -159,6 +107,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         yield _sse("session", {"session_id": session_id, "agent": CUSTOMER_SUPPORT_AGENT.name})
         reply = ""
+        cards = CardCollector()
         try:
             async for event in CUSTOMER_SUPPORT_AGENT.stream(req.message, history):
                 if event["type"] == "token":
@@ -167,10 +116,10 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                     yield _sse("reset", {})
                 elif event["type"] == "tool":
                     yield _sse("tool", {"name": event["name"], "phase": event["phase"]})
-                    if event["phase"] == "end" and event["name"] in CARD_EVENTS:
-                        cards = _cards_from(event["name"], event.get("output"))
-                        if cards:
-                            yield _sse(CARD_EVENTS[event["name"]], cards)
+                    if event["phase"] == "end":
+                        found = cards.take(event["name"], event.get("output"))
+                        if found:
+                            yield _sse(found[0], found[1])
                 elif event["type"] == "final":
                     reply = event["reply"]
         except Exception:
@@ -179,6 +128,8 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             return
 
         await _save_turn(session_id, req.message, reply)
-        yield _sse("done", {"session_id": session_id, "reply": reply})
+        # Repeated in `done` so a client that only reads the final event still
+        # gets the cards without having to follow the stream.
+        yield _sse("done", {"session_id": session_id, "reply": reply, **cards.as_dict()})
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)

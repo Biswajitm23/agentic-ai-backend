@@ -16,6 +16,7 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.api.v1.cards import CardCollector
 from app.agent.registry import AGENTS, DEFAULT_AGENT, get_agent
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal, get_db
@@ -44,6 +45,11 @@ class ChatResponse(BaseModel):
     session_id: str
     agent: str
     reply: str
+    # Cards for the client to render: each item has product_id, variant_id,
+    # title, option, price, currency, image and url. `outfit` also carries the
+    # exact total and the variants to add to the bag.
+    products: dict | None = None
+    outfit: dict | None = None
 
 
 class HistoryMessage(BaseModel):
@@ -120,12 +126,20 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatResp
     session_id = req.session_id or uuid.uuid4().hex
     history = await _load_history(db, session_id)
 
-    reply = await agent.run(req.message, history)
+    # Driven through the streamer rather than run(), because the tool results
+    # are where the product cards come from - run() returns only the prose.
+    cards = CardCollector()
+    reply = ""
+    async for event in agent.stream(req.message, history):
+        if event["type"] == "final":
+            reply = event["reply"]
+        elif event["type"] == "tool" and event.get("phase") == "end":
+            cards.take(event["name"], event.get("output"))
 
     await _save_turn(db, session_id, req.message, reply)
     if agent.remember is not None:
         await agent.remember(session_id, req.message, reply)
-    return ChatResponse(session_id=session_id, agent=req.agent, reply=reply)
+    return ChatResponse(session_id=session_id, agent=req.agent, reply=reply, **cards.as_dict())
 
 
 @router.post("/chat/stream")
@@ -138,7 +152,12 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
       reset   - {}                        clear the reply shown so far (the agent was
                                           thinking out loud before a tool call)
       tool    - {"name", "phase"}         the agent is consulting a tool
-      done    - {"session_id", "reply"}   the finished reply
+      products- {items[], currency}       cards to render: product_id, variant_id,
+                                          title, option, price, image, url
+      outfit  - {items[], total, budget,  a complete look, plus the variants the
+                 within_budget, cart_items[]}  storefront should add to the bag
+      done    - {"session_id", "reply",   the finished reply, repeating whatever
+                 products?, outfit?}      cards were produced
       error   - {"message"}               the turn failed; nothing was saved
     """
     agent = _resolve_agent(req.agent)
@@ -149,6 +168,7 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
     async def events() -> AsyncIterator[str]:
         yield _sse("session", {"session_id": session_id, "agent": agent.name})
         reply = ""
+        cards = CardCollector()
         try:
             async for event in agent.stream(req.message, history):
                 if event["type"] == "token":
@@ -157,6 +177,10 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                     yield _sse("reset", {})
                 elif event["type"] == "tool":
                     yield _sse("tool", {"name": event["name"], "phase": event["phase"]})
+                    if event["phase"] == "end":
+                        found = cards.take(event["name"], event.get("output"))
+                        if found:
+                            yield _sse(found[0], found[1])
                 elif event["type"] == "final":
                     reply = event["reply"]
         except Exception:
@@ -168,6 +192,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             await _save_turn(db, session_id, req.message, reply)
         if agent.remember is not None:
             await agent.remember(session_id, req.message, reply)
-        yield _sse("done", {"session_id": session_id, "reply": reply})
+        # Repeated in `done` so a client that only handles the final event still
+        # gets the cards without having to follow the stream.
+        yield _sse("done", {"session_id": session_id, "reply": reply, **cards.as_dict()})
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
