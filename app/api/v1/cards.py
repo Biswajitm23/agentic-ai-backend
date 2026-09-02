@@ -12,6 +12,7 @@ import json
 CARD_TOOLS = {
     "search_products": "products",
     "browse_catalogue": "products",
+    "recommend_for_me": "products",
     "build_outfit": "outfit",
 }
 MAX_CARDS = 12
@@ -28,6 +29,8 @@ def _card(item: dict) -> dict:
         "currency": item.get("currency"),
         "image": item.get("image"),
         "url": item.get("url"),
+        # Only recommendations set this; it is why the product was suggested.
+        "because": item.get("because"),
     }
 
 
