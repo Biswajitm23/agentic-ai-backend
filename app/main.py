@@ -3,6 +3,7 @@ from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import text
 
 from app.api.v1.router import api_router
 from app.core.config import settings
@@ -13,8 +14,29 @@ from app.db.session import AsyncSessionLocal, engine
 from app.services import shopify_sync
 
 
+logger = logging.getLogger(__name__)
+
+
+async def enable_pgvector() -> None:
+    """Make the pgvector extension available, in its own transaction.
+
+    Runs before create_all so a table may declare a Vector column. A failure is
+    logged rather than fatal — the rest of the API works without vector search,
+    and keeping it in a separate transaction stops a failure here from aborting
+    table creation on Postgres.
+    """
+    try:
+        async with engine.begin() as conn:
+            await conn.execute(text("CREATE EXTENSION IF NOT EXISTS vector"))
+        logger.info("pgvector extension is available")
+    except Exception:
+        logger.warning("Could not enable the pgvector extension", exc_info=True)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
+    if settings.is_postgres:
+        await enable_pgvector()
     async with engine.begin() as conn:
         await conn.run_sync(Base.metadata.create_all)
     async with AsyncSessionLocal() as session:
@@ -23,9 +45,9 @@ async def lifespan(app: FastAPI):
         try:
             async with AsyncSessionLocal() as session:
                 result = await shopify_sync.sync_shopify(session)
-                logging.getLogger(__name__).info("Shopify sync on startup: %s", result)
+                logger.info("Shopify sync on startup: %s", result)
         except Exception:
-            logging.getLogger(__name__).exception("Shopify sync on startup failed; using local data")
+            logger.exception("Shopify sync on startup failed; using local data")
     yield
 
 
