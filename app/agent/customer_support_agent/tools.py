@@ -16,6 +16,7 @@ from langchain_core.tools import tool
 
 from app.db.session import AsyncSessionLocal
 from app.services import handbook, outfit, shopify_storefront
+from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError
 
 logger = logging.getLogger(__name__)
@@ -131,11 +132,58 @@ async def build_outfit(items: str | list, budget: float = 0) -> str:
         return _fail("build_outfit", exc)
 
 
+
+NOT_SIGNED_IN = {
+    "signed_in": False,
+    "tell_customer": (
+        "I can only pull up your order history once I know it is you. Give me an order "
+        "number and the email it was placed with and I can check that order directly."
+    ),
+}
+
+
+@tool
+async def get_my_order_history() -> str:
+    """Past orders for the shopper this chat belongs to. Takes no arguments.
+
+    Only works when the storefront has signed them in and this deployment trusts
+    that; otherwise it returns signed_in=false and you should ask for an order
+    number and email instead. You cannot look up anybody else with this.
+    """
+    shopper = identity.current()
+    if shopper is None:
+        return json.dumps(NOT_SIGNED_IN)
+    try:
+        return json.dumps(await shopify_storefront.customer_orders(shopper.email), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("get_my_order_history", exc)
+
+
+@tool
+async def recommend_for_me() -> str:
+    """Suggest products for this shopper based on what they have bought before. No arguments.
+
+    Use when a signed-in shopper asks what they might like, or for a gift for the
+    same child. Returns products they do not already own, each with why it was
+    picked. Falls back to signed_in=false when there is no verified shopper.
+    """
+    shopper = identity.current()
+    if shopper is None:
+        return json.dumps(NOT_SIGNED_IN)
+    try:
+        history = await shopify_storefront.customer_orders(shopper.email, limit=10)
+        return json.dumps(await outfit.recommend_from_orders(history["orders"]), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("recommend_for_me", exc)
+
+
 CUSTOMER_SUPPORT_TOOLS = [
     search_products,
     browse_catalogue,
     build_outfit,
     check_order_status,
+    get_my_order_history,
+    recommend_for_me,
     get_store_info,
     get_store_policies,
     search_store_handbook,

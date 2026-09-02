@@ -18,7 +18,15 @@ from pydantic import BaseModel, Field
 from sqlalchemy import select
 
 from app.agent.customer_support_agent import CUSTOMER_SUPPORT_AGENT
+from app.agent.customer_support_agent.shopper_context import (
+    Cart,
+    Customer,
+    PageContext,
+    describe,
+    with_context,
+)
 from app.api.v1.cards import CardCollector
+from app.services import shopper_identity as identity
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
 
@@ -44,6 +52,12 @@ SSE_HEADERS = {
 class SupportChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
     session_id: str | None = None
+    # Optional state from the storefront widget: what is in the cart, who is
+    # signed in, and which page they are on. All of it is a claim from the
+    # browser - see shopper_context and identity for what it may and may not do.
+    cart: Cart | None = None
+    customer: Customer | None = None
+    context: PageContext | None = None
 
 
 def _sse(event: str, data: dict) -> str:
@@ -103,13 +117,17 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     """
     session_id = _resolve_session(req.session_id)
     history = await _load_history(session_id)
+    # The briefing rides along with this turn only; history keeps the raw message.
+    briefing = describe(req.cart, req.customer, req.context)
+    shopper = identity.resolve(req.customer)
 
     async def events() -> AsyncIterator[str]:
         yield _sse("session", {"session_id": session_id, "agent": CUSTOMER_SUPPORT_AGENT.name})
         reply = ""
         cards = CardCollector()
+        token = identity.set_current(shopper)
         try:
-            async for event in CUSTOMER_SUPPORT_AGENT.stream(req.message, history):
+            async for event in CUSTOMER_SUPPORT_AGENT.stream(with_context(req.message, briefing), history):
                 if event["type"] == "token":
                     yield _sse("token", {"text": event["text"]})
                 elif event["type"] == "reset":
@@ -126,6 +144,8 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             logger.exception("Support chat failed for session %s", session_id)
             yield _sse("error", {"message": "Sorry — something went wrong. Please try again."})
             return
+        finally:
+            identity.reset(token)
 
         await _save_turn(session_id, req.message, reply)
         # Repeated in `done` so a client that only reads the final event still

@@ -38,6 +38,13 @@ class Settings(BaseSettings):
     DEEPSEEK_BASE_URL: str = "https://api.deepseek.com"
     DEEPSEEK_MODEL: str = "deepseek-chat"
 
+    # The storefront widget can send who is signed in, but that block comes from
+    # the browser and can say anything. Off by default: with it on, anyone who
+    # knows a shopper's email can POST it and read that shopper's order history.
+    # Only turn it on where the request itself is authenticated (a Shopify App
+    # Proxy signature, say), or for a closed demo.
+    TRUST_STOREFRONT_CUSTOMER: bool = False
+
     # Shopify (New Shop)
     SHOPIFY_CLIENT_ID: str = ""
     SHOPIFY_CLIENT_SECRET: str = ""

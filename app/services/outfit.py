@@ -151,6 +151,75 @@ async def browse_catalogue() -> dict:
     }
 
 
+def _affinity(product: dict, categories: set[str], tags: set[str]) -> int:
+    """How well a product matches what this shopper has bought before."""
+    score = 0
+    if product["category"] and product["category"].casefold() in categories:
+        score += 2
+    score += len(tags & {tag.casefold() for tag in product.get("tags") or []})
+    return score
+
+
+async def recommend_from_orders(orders: list[dict], limit: int = 4) -> dict:
+    """Suggest live products that suit what a shopper has bought before.
+
+    Ranks the catalogue by shared category and tags with their past purchases,
+    and never suggests something they already own. Falls back to the rest of the
+    catalogue when nothing matches, so the shopper always gets an answer.
+    """
+    bought_handles: set[str] = set()
+    categories: set[str] = set()
+    tags: set[str] = set()
+    for order in orders:
+        for item in order.get("items") or []:
+            if item.get("handle"):
+                bought_handles.add(item["handle"])
+            if item.get("category"):
+                categories.add(item["category"].casefold())
+            tags.update(tag.casefold() for tag in item.get("tags") or [])
+    # Housekeeping tags every product carries say nothing about taste.
+    tags -= {"all products", "in-stock", "top products", "best seller"}
+
+    currency = (await shop_info())["currency"]
+    candidates = []
+    for node in await _active_products():
+        if node["handle"] in bought_handles:
+            continue
+        variants = node["variants"]["nodes"]
+        if not any(v["availableForSale"] for v in variants):
+            continue
+        prices = [_money(v["price"]) for v in variants if v.get("price")]
+        candidates.append(
+            {
+                "handle": node["handle"],
+                "product_id": node.get("legacyResourceId"),
+                "title": node["title"],
+                "category": _category(node["title"], node.get("productType")),
+                "tags": node.get("tags") or [],
+                "price_from": float(min(prices)) if prices else None,
+                "image": product_image(node),
+                "url": product_url(node),
+            }
+        )
+
+    ranked = sorted(candidates, key=lambda p: _affinity(p, categories, tags), reverse=True)
+    picks = ranked[:limit]
+    for pick in picks:
+        pick["because"] = (
+            "matches what you have bought before"
+            if _affinity(pick, categories, tags)
+            else "popular with other shoppers"
+        )
+        pick.pop("tags", None)
+    return {
+        "currency": currency,
+        "based_on_orders": len(orders),
+        "already_owned": sorted(bought_handles),
+        "count": len(picks),
+        "products": picks,
+    }
+
+
 def _parse_items(raw: str | list | dict) -> list[dict]:
     """Read the items the agent chose.
 

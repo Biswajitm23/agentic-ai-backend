@@ -84,6 +84,27 @@ query SupportOrderStatus($query: String!) {
 }
 """
 
+ORDERS_BY_EMAIL = """
+query SupportOrderHistory($query: String!, $first: Int!) {
+  orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+    nodes {
+      name
+      createdAt
+      cancelledAt
+      displayFulfillmentStatus
+      totalPriceSet { shopMoney { amount currencyCode } }
+      lineItems(first: 20) {
+        nodes {
+          title
+          quantity
+          product { handle productType tags }
+        }
+      }
+    }
+  }
+}
+"""
+
 SHOP_INFO = """
 query SupportShopInfo {
   shop { name currencyCode contactEmail url }
@@ -252,5 +273,44 @@ async def find_order(order_number: str, email: str) -> dict:
     }
 
 
-__all__ = ["ShopifyError", "find_order", "product_image", "product_url",
+async def customer_orders(email: str, limit: int = 5) -> dict:
+    """Recent orders for one email address, newest first.
+
+    The caller must have established that the shopper really is this person -
+    ``email:`` matches on the address alone, so this would otherwise read any
+    customer's history from a guessed address.
+    """
+    address = (email or "").strip()
+    if not address or "@" not in address:
+        return {"found": False, "reason": "email_required", "orders": []}
+
+    data = await graphql(ORDERS_BY_EMAIL, {"query": f'email:"{address}"', "first": max(1, min(limit, 20))})
+    orders = []
+    for node in data["orders"]["nodes"]:
+        status = _fulfillment_status(node)
+        money = node["totalPriceSet"]["shopMoney"]
+        orders.append(
+            {
+                "order_number": node["name"],
+                "placed_on": (node.get("createdAt") or "")[:10] or None,
+                "status": status,
+                "status_meaning": STATUS_MEANING.get(status, ""),
+                "total": round(float(money["amount"]), 2),
+                "currency": money["currencyCode"],
+                "items": [
+                    {
+                        "title": line["title"],
+                        "quantity": line["quantity"],
+                        "handle": (line.get("product") or {}).get("handle"),
+                        "category": (line.get("product") or {}).get("productType") or None,
+                        "tags": (line.get("product") or {}).get("tags") or [],
+                    }
+                    for line in node["lineItems"]["nodes"]
+                ],
+            }
+        )
+    return {"found": bool(orders), "count": len(orders), "orders": orders}
+
+
+__all__ = ["ShopifyError", "customer_orders", "find_order", "product_image", "product_url",
            "search_products", "shop_info", "variant_image"]
