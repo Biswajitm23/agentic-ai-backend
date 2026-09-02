@@ -1,7 +1,8 @@
-"""Pulls live products and orders from the store's private custom app into SQLite.
+"""Pulls live products and orders from the store's private custom app into the database.
 
-The dashboard, analysis endpoints and agent tools all read from SQLite, so a sync
-makes the whole system reflect the real store without touching those layers.
+The dashboard, analysis endpoints and the admin agent read from the database, so
+a sync makes those layers reflect the real store. The customer support agent does
+not go through here - it reads Shopify live, via ``shopify_storefront``.
 """
 
 import logging
@@ -10,8 +11,8 @@ import httpx
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from app.core.config import settings
 from app.db.models import Order, Product
+from app.services.shopify_client import graphql, is_configured  # noqa: F401  (re-exported)
 
 logger = logging.getLogger(__name__)
 
@@ -56,29 +57,6 @@ ORDERS_QUERY = """
 """
 
 
-def is_configured() -> bool:
-    return bool(settings.SHOPIFY_STORE_URL and settings.SHOPIFY_ACCESS_TOKEN)
-
-
-def _graphql_url() -> str:
-    host = settings.SHOPIFY_STORE_URL.removeprefix("https://").removeprefix("http://").strip("/")
-    return f"https://{host}/admin/api/{settings.SHOPIFY_API_VERSION}/graphql.json"
-
-
-async def _graphql(client: httpx.AsyncClient, query: str) -> dict:
-    resp = await client.post(
-        _graphql_url(),
-        json={"query": query},
-        headers={"X-Shopify-Access-Token": settings.SHOPIFY_ACCESS_TOKEN},
-        timeout=30,
-    )
-    resp.raise_for_status()
-    payload = resp.json()
-    if payload.get("errors"):
-        raise RuntimeError(f"Shopify GraphQL error: {payload['errors']}")
-    return payload["data"]
-
-
 def _order_status(node: dict) -> str:
     if node.get("cancelledAt"):
         return "cancelled"
@@ -96,8 +74,8 @@ async def sync_shopify(db: AsyncSession) -> dict:
         raise RuntimeError("Shopify is not configured: set SHOPIFY_STORE_URL and SHOPIFY_ACCESS_TOKEN")
 
     async with httpx.AsyncClient() as client:
-        products_data = await _graphql(client, PRODUCTS_QUERY)
-        orders_data = await _graphql(client, ORDERS_QUERY)
+        products_data = await graphql(PRODUCTS_QUERY, client=client)
+        orders_data = await graphql(ORDERS_QUERY, client=client)
 
     existing_products = {
         p.sku: p for p in (await db.execute(select(Product))).scalars().all()
