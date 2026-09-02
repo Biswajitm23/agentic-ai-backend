@@ -50,6 +50,7 @@ class ChatResponse(BaseModel):
     # exact total and the variants to add to the bag.
     products: dict | None = None
     outfit: dict | None = None
+    orders: dict | None = None
 
 
 class HistoryMessage(BaseModel):
@@ -153,6 +154,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
       reset   - {}                        clear the reply shown so far (the agent was
                                           thinking out loud before a tool call)
       tool    - {"name", "phase"}         the agent is consulting a tool
+      orders  - {orders[]}                    past or looked-up orders, each line
+                                                 with its image, link and variant
       products- {items[], currency}       cards to render: product_id, variant_id,
                                           title, option, price, image, url
       outfit  - {items[], total, budget,  a complete look, plus the variants the

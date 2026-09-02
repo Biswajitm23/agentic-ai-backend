@@ -78,7 +78,26 @@ query SupportOrderStatus($query: String!) {
         deliveredAt
         trackingInfo { company number url }
       }
-      lineItems(first: 20) { nodes { title quantity } }
+      lineItems(first: 20) {
+        nodes {
+          title
+          quantity
+          discountedTotalSet { shopMoney { amount currencyCode } }
+          variant {
+            legacyResourceId
+            title
+            media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+          }
+          product {
+            legacyResourceId
+            handle
+            productType
+            tags
+            onlineStoreUrl
+            featuredMedia { ... on MediaImage { image { url } } }
+          }
+        }
+      }
     }
   }
 }
@@ -119,7 +138,20 @@ query SupportOrderHistory($query: String!, $first: Int!) {
         nodes {
           title
           quantity
-          product { handle productType tags }
+          discountedTotalSet { shopMoney { amount currencyCode } }
+          variant {
+            legacyResourceId
+            title
+            media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+          }
+          product {
+            legacyResourceId
+            handle
+            productType
+            tags
+            onlineStoreUrl
+            featuredMedia { ... on MediaImage { image { url } } }
+          }
         }
       }
     }
@@ -172,6 +204,34 @@ def product_url(node: dict, variant_id: str | None = None) -> str:
     at the exact variant when one was chosen."""
     url = node.get("onlineStoreUrl") or f"https://{store_domain()}/products/{node['handle']}"
     return f"{url}?variant={variant_id}" if variant_id else url
+
+
+def order_line_card(line: dict) -> dict:
+    """One line of an order, with the picture and link for what was bought."""
+    variant = line.get("variant") or {}
+    product = line.get("product") or {}
+    variant_id = str(variant["legacyResourceId"]) if variant.get("legacyResourceId") else None
+    money = (line.get("discountedTotalSet") or {}).get("shopMoney") or {}
+    quantity = line.get("quantity") or 1
+    # Shopify gives the total for the line; the unit price is what a shopper reads.
+    line_total = round(float(money["amount"]), 2) if money.get("amount") else None
+    unit_price = round(line_total / quantity, 2) if line_total is not None and quantity else None
+    option = variant.get("title")
+    return {
+        "product_id": str(product["legacyResourceId"]) if product.get("legacyResourceId") else None,
+        "variant_id": variant_id,
+        "title": line.get("title"),
+        "option": None if option in (None, "Default Title") else option,
+        "quantity": quantity,
+        "unit_price": unit_price,
+        "line_total": line_total,
+        "currency": money.get("currencyCode"),
+        "image": variant_image(variant) or product_image(product),
+        "url": product_url(product, variant_id) if product.get("handle") else None,
+        "category": product.get("productType") or None,
+        "tags": product.get("tags") or [],
+        "handle": product.get("handle"),
+    }
 
 
 def _availability(variants: list[dict]) -> str:
@@ -283,10 +343,7 @@ async def find_order(order_number: str, email: str) -> dict:
         "payment_status": node.get("displayFinancialStatus"),
         "total": round(float(money["amount"]), 2),
         "currency": money["currencyCode"],
-        "items": [
-            {"title": i["title"], "quantity": i["quantity"]}
-            for i in node["lineItems"]["nodes"]
-        ],
+        "items": [order_line_card(line) for line in node["lineItems"]["nodes"]],
         "tracking": tracking,
         "estimated_delivery": estimated,
         # Shopify's tokenised order page: the token IS the authentication, so it
@@ -319,16 +376,7 @@ async def customer_orders(email: str, limit: int = 5) -> dict:
                 "status_meaning": STATUS_MEANING.get(status, ""),
                 "total": round(float(money["amount"]), 2),
                 "currency": money["currencyCode"],
-                "items": [
-                    {
-                        "title": line["title"],
-                        "quantity": line["quantity"],
-                        "handle": (line.get("product") or {}).get("handle"),
-                        "category": (line.get("product") or {}).get("productType") or None,
-                        "tags": (line.get("product") or {}).get("tags") or [],
-                    }
-                    for line in node["lineItems"]["nodes"]
-                ],
+                "items": [order_line_card(line) for line in node["lineItems"]["nodes"]],
             }
         )
     return {"found": bool(orders), "count": len(orders), "orders": orders}
@@ -388,5 +436,5 @@ def minor_to_major(value) -> float | None:
         return None
 
 
-__all__ = ["ShopifyError", "cart_cards", "customer_orders", "minor_to_major", "find_order", "product_image", "product_url",
+__all__ = ["ShopifyError", "cart_cards", "customer_orders", "minor_to_major", "order_line_card", "find_order", "product_image", "product_url",
            "search_products", "shop_info", "variant_image"]

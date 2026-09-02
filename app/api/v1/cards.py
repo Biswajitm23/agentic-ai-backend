@@ -15,6 +15,8 @@ CARD_TOOLS = {
     "browse_catalogue": "products",
     "recommend_for_me": "products",
     "build_outfit": "outfit",
+    "get_my_order_history": "orders",
+    "check_order_status": "orders",
 }
 MAX_CARDS = 12
 
@@ -76,7 +78,11 @@ def _card(item: dict) -> dict:
         "variant_id": item.get("variant_id"),
         "title": item.get("title"),
         "option": item.get("option"),
-        "price": item.get("unit_price", item.get("price_from")),
+        # Tools name this differently: a unit price, a "from" price, or a plain one.
+        "price": next(
+            (item[k] for k in ("unit_price", "price_from", "price") if item.get(k) is not None),
+            None,
+        ),
         "currency": item.get("currency"),
         "image": item.get("image"),
         "url": item.get("url"),
@@ -100,6 +106,31 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
 
     def card(item: dict) -> dict:
         return {**_card(item), "currency": item.get("currency") or currency}
+
+    if tool_name in ("get_my_order_history", "check_order_status"):
+        # check_order_status returns one order; the history tool returns a list.
+        orders = data.get("orders") if "orders" in data else ([data] if data.get("found") else [])
+        orders = [o for o in (orders or []) if o.get("order_number")]
+        if not orders:
+            return None
+        return {
+            "orders": [
+                {
+                    "order_number": o.get("order_number"),
+                    "placed_on": o.get("placed_on"),
+                    "status": o.get("status"),
+                    "status_meaning": o.get("status_meaning"),
+                    "total": o.get("total"),
+                    "currency": o.get("currency"),
+                    "tracking": o.get("tracking") or [],
+                    "items": [
+                        _card(i) | {"quantity": i.get("quantity"), "line_total": i.get("line_total")}
+                        for i in (o.get("items") or [])
+                    ],
+                }
+                for o in orders[:MAX_CARDS]
+            ]
+        }
 
     if tool_name == "build_outfit":
         items = data.get("outfit") or []
@@ -130,6 +161,7 @@ class CardCollector:
     def __init__(self) -> None:
         self.products: dict | None = None
         self.outfit: dict | None = None
+        self.orders: dict | None = None
 
     def take(self, tool_name: str, output: str | None) -> tuple[str, dict] | None:
         """Record a tool result. Returns (event_name, payload) when it had cards."""
@@ -151,8 +183,11 @@ class CardCollector:
         An outfit is exempt: it *is* the answer, priced and totalled, so it is
         sent whole, and the browse that fed it is dropped as noise.
         """
-        if self.outfit is not None:
+        # An outfit or an order listing IS the answer, so it is sent whole and any
+        # browse that fed it is dropped as noise.
+        if self.outfit is not None or self.orders is not None:
             self.products = None
+        if self.outfit is not None or self.orders is not None:
             return
         if self.products is None:
             return
@@ -169,4 +204,6 @@ class CardCollector:
             out["products"] = self.products
         if self.outfit is not None:
             out["outfit"] = self.outfit
+        if self.orders is not None:
+            out["orders"] = self.orders
         return out

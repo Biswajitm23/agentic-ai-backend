@@ -107,6 +107,8 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
       tool    - {"name", "phase"}                the agent is looking something up
       cart    - {items[], currency, total,       the shopper's own cart, with an image
                  item_count}                      and link added to every line
+      orders  - {orders[]}                    past or looked-up orders, each line
+                                                 with its image, link and variant
       products- {items[], currency}               product cards to render: each has
                                                  product_id, variant_id, title, option,
                                                  price, image and url
