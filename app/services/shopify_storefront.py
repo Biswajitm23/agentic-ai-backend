@@ -84,6 +84,28 @@ query SupportOrderStatus($query: String!) {
 }
 """
 
+CART_PRODUCTS = """
+query SupportCartProducts($query: String!, $first: Int!) {
+  products(first: $first, query: $query) {
+    nodes {
+      legacyResourceId
+      title
+      handle
+      onlineStoreUrl
+      featuredMedia { ... on MediaImage { image { url } } }
+      variants(first: 100) {
+        nodes {
+          legacyResourceId
+          title
+          price
+          media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+        }
+      }
+    }
+  }
+}
+"""
+
 ORDERS_BY_EMAIL = """
 query SupportOrderHistory($query: String!, $first: Int!) {
   orders(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
@@ -312,5 +334,59 @@ async def customer_orders(email: str, limit: int = 5) -> dict:
     return {"found": bool(orders), "count": len(orders), "orders": orders}
 
 
-__all__ = ["ShopifyError", "customer_orders", "find_order", "product_image", "product_url",
+async def cart_cards(lines: list[dict], currency: str | None = None) -> list[dict]:
+    """Give the shopper's own cart lines a picture and a link.
+
+    The widget sends handles and variant ids but no imagery, so look the products
+    up and attach the image for the exact variant in the cart - the blue hairband
+    rather than whichever one happens to be featured.
+    """
+    handles = [str(line.get("handle")).strip() for line in lines if line.get("handle")]
+    products: dict[str, dict] = {}
+    if handles:
+        joined = " OR ".join(f"handle:{h}" for h in dict.fromkeys(handles))
+        data = await graphql(CART_PRODUCTS, {"query": joined, "first": min(len(handles) + 5, 50)})
+        products = {node["handle"]: node for node in data["products"]["nodes"]}
+
+    cards = []
+    for line in lines:
+        handle = str(line.get("handle") or "")
+        node = products.get(handle)
+        variant_id = str(line.get("variant_id") or "") or None
+        image = None
+        if node:
+            variant = next(
+                (v for v in node["variants"]["nodes"] if str(v.get("legacyResourceId")) == variant_id),
+                None,
+            )
+            image = (variant_image(variant) if variant else None) or product_image(node)
+        cards.append(
+            {
+                "product_id": str(line.get("product_id")) if line.get("product_id") else (
+                    node.get("legacyResourceId") if node else None
+                ),
+                "variant_id": variant_id,
+                "title": line.get("title") or (node["title"] if node else None),
+                "option": line.get("variant_title"),
+                "quantity": line.get("quantity") or 1,
+                "price": minor_to_major(line.get("line_price")),
+                "currency": currency,
+                "image": image,
+                "url": product_url(node, variant_id) if node else None,
+            }
+        )
+    return cards
+
+
+def minor_to_major(value) -> float | None:
+    """Shopify sends cart money in the currency's minor unit: 2635 is 26.35."""
+    if value is None:
+        return None
+    try:
+        return round(int(value) / 100, 2)
+    except (TypeError, ValueError):
+        return None
+
+
+__all__ = ["ShopifyError", "cart_cards", "customer_orders", "minor_to_major", "find_order", "product_image", "product_url",
            "search_products", "shop_info", "variant_image"]

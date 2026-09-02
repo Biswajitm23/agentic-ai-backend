@@ -26,7 +26,7 @@ from app.agent.customer_support_agent.shopper_context import (
     with_context,
 )
 from app.api.v1.cards import CardCollector
-from app.services import shopper_identity as identity
+from app.services import shopify_storefront, shopper_identity as identity
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
 
@@ -105,6 +105,8 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
       reset   - {}                               clear the reply shown so far; the agent
                                                  was thinking out loud before a lookup
       tool    - {"name", "phase"}                the agent is looking something up
+      cart    - {items[], currency, total,       the shopper's own cart, with an image
+                 item_count}                      and link added to every line
       products- {items[], currency}               product cards to render: each has
                                                  product_id, variant_id, title, option,
                                                  price, image and url
@@ -123,6 +125,24 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
 
     async def events() -> AsyncIterator[str]:
         yield _sse("session", {"session_id": session_id, "agent": CUSTOMER_SUPPORT_AGENT.name})
+
+        # The widget sends the cart without imagery, so hand it straight back with
+        # pictures and links. Sent before the reply so the panel can draw at once.
+        cart_payload: dict | None = None
+        if req.cart and req.cart.items:
+            try:
+                cart_payload = {
+                    "items": await shopify_storefront.cart_cards(
+                        [line.model_dump() for line in req.cart.items], req.cart.currency
+                    ),
+                    "currency": req.cart.currency,
+                    "item_count": req.cart.item_count,
+                    "total": shopify_storefront.minor_to_major(req.cart.total_price),
+                }
+                yield _sse("cart", cart_payload)
+            except Exception:
+                logger.warning("Could not decorate the cart for session %s", session_id, exc_info=True)
+
         reply = ""
         cards = CardCollector()
         token = identity.set_current(shopper)
@@ -150,6 +170,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         await _save_turn(session_id, req.message, reply)
         # Repeated in `done` so a client that only reads the final event still
         # gets the cards without having to follow the stream.
-        yield _sse("done", {"session_id": session_id, "reply": reply, **cards.as_dict()})
+        done_payload = {"session_id": session_id, "reply": reply, **cards.as_dict()}
+        if cart_payload:
+            done_payload["cart"] = cart_payload
+        yield _sse("done", done_payload)
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
