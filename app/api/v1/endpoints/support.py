@@ -155,9 +155,8 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                 elif event["type"] == "tool":
                     yield _sse("tool", {"name": event["name"], "phase": event["phase"]})
                     if event["phase"] == "end":
-                        found = cards.take(event["name"], event.get("output"))
-                        if found:
-                            yield _sse(found[0], found[1])
+                        # Collected now, sent once the reply exists - see finalise().
+                        cards.take(event["name"], event.get("output"))
                 elif event["type"] == "final":
                     reply = event["reply"]
         except Exception:
@@ -170,6 +169,10 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         await _save_turn(session_id, req.message, reply)
         # Repeated in `done` so a client that only reads the final event still
         # gets the cards without having to follow the stream.
+        cards.finalise(reply)
+        for name, payload in cards.as_dict().items():
+            yield _sse(name, payload)
+
         done_payload = {"session_id": session_id, "reply": reply, **cards.as_dict()}
         if cart_payload:
             done_payload["cart"] = cart_payload

@@ -7,6 +7,7 @@ takes it in one piece.
 """
 
 import json
+import re
 
 # Tools whose result a client can render as cards, and the key it arrives under.
 CARD_TOOLS = {
@@ -16,6 +17,56 @@ CARD_TOOLS = {
     "build_outfit": "outfit",
 }
 MAX_CARDS = 12
+
+
+_WORD_RE = re.compile(r"[a-z0-9]+")
+# Words that say nothing about which product this is.
+_NOISE = {"the", "and", "for", "with", "in", "of", "a", "an", "kids", "girls", "boys"}
+# Used only when a title has no word of its own to be recognised by.
+_MENTION_RATIO = 0.5
+
+
+def _stem(word: str) -> str:
+    """Fold simple plurals so "Mary Janes" still finds "Mary Jane"."""
+    return word[:-1] if len(word) > 3 and word.endswith("s") else word
+
+
+def _words(text: str) -> set[str]:
+    return {_stem(w) for w in _WORD_RE.findall(text.lower()) if len(w) > 2 and w not in _NOISE}
+
+
+def keep_mentioned(items: list[dict], reply: str) -> list[dict]:
+    """The products the reply actually talks about.
+
+    Prose shortens titles - "Catherine Gingham Embroidered Sleeveless Trapeze
+    Dress" becomes "the Catherine Gingham dress", "Leather Mary Jane Shoes"
+    becomes "the Mary Janes" - so a product counts as mentioned when the reply
+    uses a word that belongs to it alone.
+
+    Matching on any shared word would be wrong in the other direction: with
+    "Leather T Bar Baby Shoes" in the reply, "leather" and "shoes" must not drag
+    the Mary Janes in beside it.
+    """
+    said = _words(reply)
+    title_words = [(item, _words(item.get("title") or "")) for item in items]
+
+    frequency: dict[str, int] = {}
+    for _, words in title_words:
+        for word in words:
+            frequency[word] = frequency.get(word, 0) + 1
+
+    kept = []
+    for item, words in title_words:
+        if not words:
+            continue
+        distinctive = {w for w in words if frequency.get(w, 1) == 1}
+        if distinctive:
+            if distinctive & said:
+                kept.append(item)
+        elif len(words & said) / len(words) >= _MENTION_RATIO:
+            # Nothing sets this title apart, so fall back to how much of it appears.
+            kept.append(item)
+    return kept
 
 
 def _card(item: dict) -> dict:
@@ -88,6 +139,28 @@ class CardCollector:
         name = CARD_TOOLS[tool_name]
         setattr(self, name, cards)
         return name, cards
+
+    def finalise(self, reply: str) -> None:
+        """Reconcile the cards with the answer the shopper actually reads.
+
+        A tool hands back everything it found - the whole catalogue, ten search
+        results - and the agent then picks a few to talk about. Sending all of
+        them would show five products under a list of three. So once the reply
+        exists, keep only what it mentions.
+
+        An outfit is exempt: it *is* the answer, priced and totalled, so it is
+        sent whole, and the browse that fed it is dropped as noise.
+        """
+        if self.outfit is not None:
+            self.products = None
+            return
+        if self.products is None:
+            return
+        items = self.products.get("items") or []
+        kept = keep_mentioned(items, reply)
+        # Never leave a shopper with nothing to click because the wording drifted.
+        if kept:
+            self.products = {**self.products, "items": kept}
 
     def as_dict(self) -> dict:
         """Whatever was collected, for the final payload."""

@@ -136,6 +136,7 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatResp
         elif event["type"] == "tool" and event.get("phase") == "end":
             cards.take(event["name"], event.get("output"))
 
+    cards.finalise(reply)
     await _save_turn(db, session_id, req.message, reply)
     if agent.remember is not None:
         await agent.remember(session_id, req.message, reply)
@@ -178,9 +179,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
                 elif event["type"] == "tool":
                     yield _sse("tool", {"name": event["name"], "phase": event["phase"]})
                     if event["phase"] == "end":
-                        found = cards.take(event["name"], event.get("output"))
-                        if found:
-                            yield _sse(found[0], found[1])
+                        # Collected now, sent once the reply exists - see finalise().
+                        cards.take(event["name"], event.get("output"))
                 elif event["type"] == "final":
                     reply = event["reply"]
         except Exception:
@@ -194,6 +194,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             await agent.remember(session_id, req.message, reply)
         # Repeated in `done` so a client that only handles the final event still
         # gets the cards without having to follow the stream.
+        cards.finalise(reply)
+        for name, payload in cards.as_dict().items():
+            yield _sse(name, payload)
         yield _sse("done", {"session_id": session_id, "reply": reply, **cards.as_dict()})
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
