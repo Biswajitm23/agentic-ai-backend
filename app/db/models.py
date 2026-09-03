@@ -32,6 +32,7 @@ class Product(Base):
     variant_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     shopify_product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     shopify_variant_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    handle: Mapped[str | None] = mapped_column(String(255), nullable=True)
     has_cost: Mapped[bool] = mapped_column(default=True)
     source: Mapped[str] = mapped_column(String(16), default=SOURCE_SEED)
 
@@ -81,6 +82,7 @@ class Order(Base):
     utm_campaign: Mapped[str | None] = mapped_column(String(200), nullable=True)
     utm_source: Mapped[str | None] = mapped_column(String(100), nullable=True)
     utm_medium: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    shopify_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
     source: Mapped[str] = mapped_column(String(16), default=SOURCE_SEED)
 
 

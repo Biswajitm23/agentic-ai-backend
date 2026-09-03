@@ -42,7 +42,17 @@ async def store_meta(db: AsyncSession) -> dict:
         "campaign_source": meta.get("campaign_source") or "demo",
         "scopes": meta.get("scopes") or [],
         "missing_scopes": meta.get("missing_scopes") or {},
+        "storefront_url": meta.get("storefront_url"),
+        "admin_url": meta.get("admin_url"),
     }
+
+
+def product_links(p: Product, storefront: str | None, admin: str | None) -> dict:
+    """Where a product can be opened: the shop page for live products, the
+    admin page otherwise (drafts have no public page)."""
+    url = f"{storefront}/products/{p.handle}" if storefront and p.handle and p.status == "active" else None
+    admin_url = f"{admin}/products/{p.shopify_product_id}" if admin and p.shopify_product_id else None
+    return {"url": url, "admin_url": admin_url}
 
 
 async def currency(db: AsyncSession) -> str:
@@ -56,6 +66,7 @@ async def currency(db: AsyncSession) -> str:
 
 
 async def inventory_summary(db: AsyncSession) -> dict:
+    meta = await store_meta(db)
     products = (await db.execute(select(Product).order_by(Product.stock_qty, Product.name))).scalars().all()
     active = [p for p in products if p.status == "active"]
     out_of_stock = [p for p in active if p.stock_qty <= 0]
@@ -69,7 +80,9 @@ async def inventory_summary(db: AsyncSession) -> dict:
         c["units"] += max(p.stock_qty, 0)
         c["low_stock"] += 1 if p.stock_qty <= p.reorder_level else 0
     return {
-        "currency": await currency(db),
+        "currency": meta["currency"],
+        "storefront_url": meta["storefront_url"],
+        "admin_url": meta["admin_url"],
         "total_skus": len(active),
         "total_products": len({p.shopify_product_id or p.sku for p in active}),
         "total_units": sum(max(p.stock_qty, 0) for p in active),
@@ -81,7 +94,13 @@ async def inventory_summary(db: AsyncSession) -> dict:
         "draft_or_archived": len(products) - len(active),
         "categories": [{"category": k, **v} for k, v in sorted(categories.items(), key=lambda kv: -kv[1]["units"])],
         "low_stock_items": [
-            {"sku": p.sku, "name": p.name, "stock_qty": p.stock_qty, "reorder_level": p.reorder_level}
+            {
+                "sku": p.sku,
+                "name": p.name,
+                "stock_qty": p.stock_qty,
+                "reorder_level": p.reorder_level,
+                **product_links(p, meta["storefront_url"], meta["admin_url"]),
+            }
             for p in low_stock
         ],
         "products": [
@@ -97,6 +116,7 @@ async def inventory_summary(db: AsyncSession) -> dict:
                 "reorder_level": p.reorder_level,
                 "low_stock": p.stock_qty <= p.reorder_level,
                 "out_of_stock": p.stock_qty <= 0,
+                **product_links(p, meta["storefront_url"], meta["admin_url"]),
             }
             for p in products
         ],
@@ -148,6 +168,8 @@ async def marketing_summary(db: AsyncSession) -> dict:
 
 
 async def operations_summary(db: AsyncSession) -> dict:
+    meta = await store_meta(db)
+    admin = meta["admin_url"]
     orders = (await db.execute(select(Order).order_by(Order.created_at.desc(), Order.id.desc()))).scalars().all()
     tasks = (await db.execute(select(OpsTask).order_by(OpsTask.due_date))).scalars().all()
     today = date.today()
@@ -162,7 +184,8 @@ async def operations_summary(db: AsyncSession) -> dict:
     recent = [o for o in live if o.created_at and o.created_at >= recent_cutoff]
     overdue = [t for t in tasks if t.status != "done" and t.due_date and t.due_date < today]
     return {
-        "currency": await currency(db),
+        "currency": meta["currency"],
+        "admin_url": admin,
         "total_orders": len(orders),
         "orders_by_status": by_status,
         "orders_by_channel": by_channel,
@@ -197,6 +220,7 @@ async def operations_summary(db: AsyncSession) -> dict:
                 "channel": o.channel,
                 "items": o.item_count,
                 "created_at": o.created_at.isoformat() if o.created_at else None,
+                "admin_url": f"{admin}/orders/{o.shopify_order_id}" if admin and o.shopify_order_id else None,
             }
             for o in orders[:15]
         ],
@@ -283,7 +307,16 @@ async def all_summaries(db: AsyncSession) -> dict[str, dict]:
 # --------------------------------------------------------------------------- #
 
 
-def _action(domain: str, severity: str, title: str, detail: str, metric: str, next_step: str) -> dict:
+def _action(
+    domain: str,
+    severity: str,
+    title: str,
+    detail: str,
+    metric: str,
+    next_step: str,
+    impact: str = "",
+    steps: list[str] | None = None,
+) -> dict:
     return {
         "domain": domain,
         "severity": severity,
@@ -291,38 +324,65 @@ def _action(domain: str, severity: str, title: str, detail: str, metric: str, ne
         "detail": detail,
         "metric": metric,
         "next_step": next_step,
+        "impact": impact,
+        "steps": steps or [],
+        "link": f"#{domain}-analysis",
     }
 
 
 def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
-    """Rule-based, explainable actions from the four domain summaries."""
+    """Rule-based, explainable actions from the four domain summaries.
+
+    Each action carries what is wrong (detail), why it matters (impact), the
+    number behind it (metric) and how to fix it (steps + next_step), so the
+    dashboard can show a one-line row that opens into a working checklist.
+    """
     inv, mkt, ops, fin = s["inventory"], s["marketing"], s["operations"], s["finance"]
     cur = fin["currency"]
     actions: list[dict] = []
 
-    # inventory
+    # ---------------------------------------------------------------- inventory
     if inv["out_of_stock_count"]:
-        names = ", ".join(i["name"] for i in inv["low_stock_items"] if i["stock_qty"] <= 0)
+        out_items = [i for i in inv["low_stock_items"] if i["stock_qty"] <= 0]
+        names = ", ".join(i["name"] for i in out_items[:6])
         actions.append(
             _action(
                 "inventory",
                 "critical",
                 f"{inv['out_of_stock_count']} variant(s) are out of stock",
-                f"Sales are being lost on: {names[:220]}{'…' if len(names) > 220 else ''}.",
+                f"Shoppers can see but cannot buy: {names}{'…' if len(out_items) > 6 else ''}.",
                 f"{inv['out_of_stock_count']} of {inv['total_skus']} SKUs",
-                "Place a purchase order or hide the variants from the storefront.",
+                "Raise a purchase order today, or hide the variants until stock lands.",
+                impact="Every visit to an out-of-stock page is a lost sale and a signal to search engines that the listing is stale.",
+                steps=[
+                    "Open Inventory analysis and filter to 'Needs attention' to see the exact SKUs.",
+                    "Check incoming purchase orders in Shopify Admin → Products → Inventory → Incoming.",
+                    "For anything with no inbound stock, either reorder now or set the variant to 'Continue selling when out of stock' off and hide it.",
+                    "Add a back-in-stock notification so the demand is captured, not lost.",
+                ],
             )
         )
     low_only = inv["low_stock_count"] - inv["out_of_stock_count"]
     if low_only > 0:
+        low_items = [i for i in inv["low_stock_items"] if i["stock_qty"] > 0]
         actions.append(
             _action(
                 "inventory",
                 "high",
                 f"{low_only} variant(s) at or below reorder level",
-                "These will run out before a normal restock lead time.",
+                "These will sell through before a normal supplier lead time: "
+                + ", ".join(f"{i['name']} ({i['stock_qty']} left)" for i in low_items[:5])
+                + ("…" if len(low_items) > 5 else "")
+                + ".",
                 f"{low_only} SKUs",
-                "Reorder from suppliers this week.",
+                "Reorder this week, prioritising the fastest sellers.",
+                impact="Running out mid-campaign wastes the marketing spend that drove the traffic.",
+                steps=[
+                    "Sort Inventory analysis by stock to see which variants are closest to zero.",
+                    "Compare each against its last-30-day sales to size the reorder.",
+                    "Send purchase orders to suppliers; note expected arrival dates in Shopify.",
+                    "Raise the reorder level on anything that keeps triggering this alert.",
+                ],
             )
         )
     if inv["missing_cost_count"]:
@@ -331,17 +391,33 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 "inventory",
                 "medium",
                 f"{inv['missing_cost_count']} variant(s) have no unit cost",
-                "Stock value, cost of goods and margins are understated until costs are entered.",
+                "Without a cost per item Shopify cannot tell us what stock is worth or what each order really earns.",
                 f"{inv['missing_cost_count']} of {inv['total_skus']} SKUs",
-                "Add cost per item on each variant's inventory settings in Shopify.",
+                "Enter 'Cost per item' on each variant in Shopify.",
+                impact="Stock value, cost of goods, gross margin and the Finance health score are all understated until this is fixed.",
+                steps=[
+                    "In Shopify Admin go to Products → Inventory and export a CSV.",
+                    "Fill the 'Cost per item' column from supplier invoices.",
+                    "Re-import the CSV, then press 'Sync store data' here.",
+                    "Check the Finance section: gross margin should now reflect real cost of goods.",
+                ],
             )
         )
     if inv["total_skus"] == 0:
         actions.append(
-            _action("inventory", "high", "No active products", "The catalogue is empty or all products are drafts.", "0 SKUs", "Publish products or sync the store.")
+            _action(
+                "inventory",
+                "high",
+                "No active products",
+                "The catalogue is empty or every product is a draft.",
+                "0 SKUs",
+                "Publish products or sync the store.",
+                impact="Nothing can be sold until at least one product is active.",
+                steps=["Open Shopify Admin → Products and set products to Active.", "Press 'Sync store data'."],
+            )
         )
 
-    # marketing
+    # ---------------------------------------------------------------- marketing
     overspent = [c for c in mkt["campaigns"] if c["budget"] and c["spend"] > c["budget"]]
     if overspent:
         actions.append(
@@ -349,9 +425,14 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 "marketing",
                 "high",
                 f"{len(overspent)} campaign(s) over budget",
-                ", ".join(c["name"] for c in overspent[:4]),
+                ", ".join(f"{c['name']} ({c['spend']:,.0f} of {c['budget']:,.0f} {cur})" for c in overspent[:4]),
                 f"{len(overspent)} campaigns",
                 "Cap daily spend or raise the budget deliberately.",
+                impact="Uncapped spend erodes the margin the campaign was supposed to create.",
+                steps=[
+                    "Open each campaign in its ad platform and set a daily cap.",
+                    "Compare its ROAS with the others in Marketing analysis; move budget to the best performer.",
+                ],
             )
         )
     weak = [c for c in mkt["campaigns"] if c["roas"] is not None and c["roas"] < 1 and c["spend"] > 0]
@@ -363,7 +444,13 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 f"{len(weak)} campaign(s) return less than they cost",
                 ", ".join(f"{c['name']} ({c['roas']}x)" for c in weak[:4]),
                 "ROAS < 1.0x",
-                "Pause or rework creative and targeting.",
+                "Pause them, or rework creative and targeting before spending more.",
+                impact="Each unit of spend on these campaigns loses money before any other cost is counted.",
+                steps=[
+                    "Pause the campaign in the ad platform.",
+                    "Check landing-page conversion and audience overlap before relaunching.",
+                    "Relaunch with a small test budget and a clear ROAS target (2x or better).",
+                ],
             )
         )
     if mkt["total_campaigns"] and mkt["active_campaigns"] == 0:
@@ -371,10 +458,16 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
             _action(
                 "marketing",
                 "medium",
-                "No campaign has produced an order in 30 days",
-                "Every channel is inactive on a 30-day window.",
+                "No channel has produced an order in 30 days",
+                "Every campaign or sales channel is inactive on a 30-day window.",
                 f"0 of {mkt['total_campaigns']} active",
-                "Launch a promotion or re-engage past customers.",
+                "Run a promotion or re-engage past customers this week.",
+                impact="Without fresh demand the store is coasting on organic traffic only.",
+                steps=[
+                    "Pick the channel with the highest historic revenue in Marketing analysis.",
+                    "Launch a time-boxed offer (a discount code makes it measurable here).",
+                    "Email past customers; Shopify Email is free for the first 10,000 sends a month.",
+                ],
             )
         )
     if mkt["campaign_source"] == "order_attribution" and mkt["attribution_rate_pct"] < 50:
@@ -382,10 +475,16 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
             _action(
                 "marketing",
                 "medium",
-                f"Only {mkt['attribution_rate_pct']}% of orders are attributed to a campaign",
-                "Without UTM tags or discount codes, marketing results cannot be separated from direct sales.",
+                f"Only {mkt['attribution_rate_pct']:.0f}% of orders are attributed to a campaign",
+                "Most orders carry no UTM tag or discount code, so marketing results cannot be separated from direct sales.",
                 f"{mkt['attributed_orders']} attributed orders",
-                "Tag every campaign link with utm_campaign and grant the app read_marketing_events.",
+                "Tag every campaign link with utm_campaign and give each promotion its own discount code.",
+                impact="Until attribution improves, ROAS and channel comparisons here are estimates at best.",
+                steps=[
+                    "Add utm_source, utm_medium and utm_campaign to every ad, email and social link.",
+                    "Create one discount code per promotion so orders can be tied back to it.",
+                    "Grant the app the read_marketing_events scope so Shopify Marketing campaigns sync directly.",
+                ],
             )
         )
     if mkt["campaigns"]:
@@ -397,21 +496,33 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                     "low",
                     f"Top channel: {top['name']}",
                     f"{top['conversions']} order(s), {top['revenue']:,.2f} {cur} in revenue.",
-                    f"{_pct(top['revenue'], mkt['total_revenue'])}% of attributed revenue",
+                    f"{_pct(top['revenue'], mkt['total_revenue']):.0f}% of attributed revenue",
                     "Double down on what is already converting.",
+                    impact="Scaling a proven channel is cheaper than opening a new one.",
+                    steps=[
+                        "Increase budget or posting frequency on this channel by 20% and watch ROAS for two weeks.",
+                        "Copy its best-performing creative and offer to the second-best channel.",
+                    ],
                 )
             )
 
-    # operations
+    # --------------------------------------------------------------- operations
     if ops["pending_orders"]:
         actions.append(
             _action(
                 "operations",
                 "high" if ops["pending_orders"] >= 3 else "medium",
                 f"{ops['pending_orders']} order(s) awaiting fulfilment",
-                f"{ops['pending_value']:,.2f} {cur} of paid demand has not shipped.",
-                f"{ops['fulfillment_rate_pct']}% fulfilled",
+                f"{ops['pending_value']:,.2f} {cur} of paid demand has not shipped yet.",
+                f"{ops['fulfillment_rate_pct']:.0f}% fulfilled",
                 "Pick, pack and mark them fulfilled in Shopify today.",
+                impact="Late shipping is the top driver of refund requests and one-star reviews.",
+                steps=[
+                    "Open Operations analysis; the oldest pending orders are at the top.",
+                    "In Shopify Admin → Orders filter by 'Unfulfilled' and print packing slips.",
+                    "Mark each order fulfilled with a tracking number so the customer is notified.",
+                    "If stock is the blocker, tell the customer and offer a substitute or refund.",
+                ],
             )
         )
     if ops["overdue_tasks"]:
@@ -422,7 +533,9 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 f"{ops['overdue_tasks']} task(s) are overdue",
                 ", ".join(t["title"] for t in ops["tasks"] if t["overdue"])[:220],
                 f"{ops['overdue_tasks']} overdue",
-                "Reassign or close them out.",
+                "Reassign or close them out today.",
+                impact="Overdue tasks usually hide a stalled order, restock or payment.",
+                steps=["Review each task in Operations analysis.", "Close what is done; give the rest a new owner and date."],
             )
         )
     elif ops["high_priority_tasks"]:
@@ -434,6 +547,8 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 ", ".join(t["title"] for t in ops["tasks"] if t["priority"] == "high" and t["status"] != "done")[:220],
                 f"{ops['open_tasks']} open in total",
                 "Work these before anything else today.",
+                impact="High-priority tasks are generated from live store problems, so they age badly.",
+                steps=["Open Operations analysis → Tasks.", "Start with the earliest due date."],
             )
         )
     if ops["cancellation_rate_pct"] > 10:
@@ -441,18 +556,36 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
             _action(
                 "operations",
                 "medium",
-                f"Cancellation rate is {ops['cancellation_rate_pct']}%",
+                f"Cancellation rate is {ops['cancellation_rate_pct']:.0f}%",
                 "More than one order in ten is cancelled.",
                 f"{ops['orders_by_status'].get('cancelled', 0)} cancelled",
-                "Review reasons: stock-outs, payment failures or fraud.",
+                "Find the cause: stock-outs, payment failures or fraud.",
+                impact="Cancelled orders cost the acquisition spend that won them and skew every conversion metric.",
+                steps=[
+                    "In Shopify Admin filter orders by 'Cancelled' and read the cancellation reasons.",
+                    "If stock-related, fix inventory first; if payment-related, review the gateway's decline codes.",
+                ],
             )
         )
     if ops["orders_last_30d"] == 0 and ops["total_orders"]:
         actions.append(
-            _action("operations", "medium", "No orders in the last 30 days", "The store has gone quiet.", "0 orders / 30d", "Check the storefront and run a promotion.")
+            _action(
+                "operations",
+                "medium",
+                "No orders in the last 30 days",
+                "The store has gone quiet.",
+                "0 orders / 30d",
+                "Check the storefront works end to end, then run a promotion.",
+                impact="A month without orders usually means a broken checkout or no traffic, both fixable.",
+                steps=[
+                    "Place a test order on the storefront to confirm checkout works.",
+                    "Check Shopify Analytics for sessions; if traffic exists, the problem is conversion.",
+                    "Launch an offer to past customers.",
+                ],
+            )
         )
 
-    # finance
+    # ------------------------------------------------------------------ finance
     if fin["net_profit"] < 0:
         actions.append(
             _action(
@@ -460,8 +593,14 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 "critical",
                 "The store is running at a loss",
                 f"Expenses of {fin['total_expenses']:,.2f} {cur} exceed revenue of {fin['total_revenue']:,.2f} {cur}.",
-                f"{fin['profit_margin_pct']}% margin",
+                f"{fin['profit_margin_pct']:.0f}% margin",
                 "Cut the largest cost category or raise prices on low-margin items.",
+                impact="Losses compound: cash runs out before the fix has time to work.",
+                steps=[
+                    "Open Finance analysis → Expenses by category and start with the largest.",
+                    "List products by gross margin; raise prices or drop the lowest.",
+                    "Set a weekly check on net profit until it turns positive.",
+                ],
             )
         )
     elif fin["total_revenue"] and fin["profit_margin_pct"] < 15:
@@ -469,10 +608,12 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
             _action(
                 "finance",
                 "high",
-                f"Thin net margin: {fin['profit_margin_pct']}%",
+                f"Thin net margin: {fin['profit_margin_pct']:.0f}%",
                 "Below a 15% net margin a small cost increase turns into a loss.",
                 f"{fin['net_profit']:,.2f} {cur} net",
-                "Review pricing and the biggest expense categories.",
+                "Review pricing and the two biggest expense categories.",
+                impact="A thin margin leaves no room for a refund wave or a shipping-rate increase.",
+                steps=["Compare price against unit cost per product.", "Negotiate the top expense category first."],
             )
         )
     if fin["unpaid_orders"]:
@@ -484,6 +625,11 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 f"{fin['unpaid_value']:,.2f} {cur} is outstanding.",
                 f"{fin['unpaid_orders']} unpaid",
                 "Send payment reminders or cancel abandoned orders.",
+                impact="Unpaid orders tie up stock that could be sold to someone else.",
+                steps=[
+                    "In Shopify Admin filter orders by payment status 'Pending'.",
+                    "Send the invoice again; cancel anything older than 7 days to release the stock.",
+                ],
             )
         )
     if fin["total_revenue"] and _pct(fin["refunds"], fin["gross_sales"]) > 5:
@@ -491,10 +637,12 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
             _action(
                 "finance",
                 "medium",
-                f"Refunds are {_pct(fin['refunds'], fin['gross_sales'])}% of gross sales",
+                f"Refunds are {_pct(fin['refunds'], fin['gross_sales']):.0f}% of gross sales",
                 f"{fin['refunds']:,.2f} {cur} has been refunded.",
                 "> 5% refund rate",
                 "Look for a product or shipping problem behind the returns.",
+                impact="Refunds cost the sale, the shipping and often the product itself.",
+                steps=["Group refunded orders by product.", "Fix the description, sizing or packaging of the worst offender."],
             )
         )
     if fin["expenses_by_category"]:
@@ -505,10 +653,12 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 _action(
                     "finance",
                     "low",
-                    f"{top_cat} is {share}% of all expenses",
+                    f"{top_cat} is {share:.0f}% of all expenses",
                     f"{top_amt:,.2f} {cur} - the single biggest lever on profit.",
-                    f"{share}% of expenses",
-                    "Negotiate this cost first.",
+                    f"{share:.0f}% of expenses",
+                    "Negotiate or restructure this cost first.",
+                    impact="A 10% saving here moves net profit more than any other category.",
+                    steps=["Open Finance analysis → Expenses by category.", "Benchmark this cost against two alternative suppliers or rates."],
                 )
             )
 

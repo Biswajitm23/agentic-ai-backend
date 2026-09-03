@@ -35,6 +35,7 @@ import httpx
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from app.core.config import settings
 from app.db.models import (
     SOURCE_SEED,
     SOURCE_SHOPIFY,
@@ -57,7 +58,7 @@ ACTIVE_WINDOW_DAYS = 30
 
 SHOP_QUERY = """
 {
-  shop { name currencyCode ianaTimezone }
+  shop { name myshopifyDomain currencyCode ianaTimezone primaryDomain { url } }
   currentAppInstallation { accessScopes { handle } }
 }
 """
@@ -70,6 +71,7 @@ query Products($cursor: String) {
       node {
         id
         title
+        handle
         productType
         vendor
         status
@@ -271,6 +273,7 @@ async def _sync_products(db: AsyncSession, nodes: list[dict]) -> int:
             row.stock_qty = int(v.get("inventoryQuantity") or 0)
             row.shopify_product_id = _gid_tail(p["id"])
             row.shopify_variant_id = _gid_tail(v["id"])
+            row.handle = p.get("handle")
             row.source = SOURCE_SHOPIFY
             count += 1
 
@@ -327,6 +330,7 @@ async def _sync_orders(db: AsyncSession, nodes: list[dict]) -> int:
         codes = o.get("discountCodes") or []
         row.discount_code = codes[0] if codes else None
         row.utm_campaign, row.utm_source, row.utm_medium = _attribution(o)
+        row.shopify_order_id = _gid_tail(o.get("id"))
         row.source = SOURCE_SHOPIFY
 
         fees = 0.0
@@ -628,6 +632,13 @@ async def sync_shopify(db: AsyncSession) -> dict:
     await _set_setting(db, "shop_name", shop.get("name"))
     await _set_setting(db, "currency", currency)
     await _set_setting(db, "timezone", shop.get("ianaTimezone"))
+    # The admin lives under the handle the API is reached on (a renamed store
+    # keeps answering on its old myshopifyDomain, but the admin uses the new one).
+    configured_host = settings.SHOPIFY_STORE_URL.removeprefix("https://").removeprefix("http://").strip("/")
+    handle = (configured_host or shop.get("myshopifyDomain") or "").split(".")[0]
+    storefront = ((shop.get("primaryDomain") or {}).get("url") or f"https://{configured_host}").rstrip("/")
+    await _set_setting(db, "storefront_url", storefront)
+    await _set_setting(db, "admin_url", f"https://admin.shopify.com/store/{handle}" if handle else None)
     await _set_setting(db, "scopes", scopes)
     await _set_setting(db, "missing_scopes", missing)
     await _set_setting(db, "campaign_source", campaign_source)

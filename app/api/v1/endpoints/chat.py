@@ -51,6 +51,9 @@ class ChatResponse(BaseModel):
     products: dict | None = None
     outfit: dict | None = None
     orders: dict | None = None
+    # Suggested follow-ups and places to act: {type: "chip", label} or
+    # {type: "link", label, href}. Rendered as buttons under the reply.
+    actions: list[dict] = []
 
 
 class HistoryMessage(BaseModel):
@@ -137,11 +140,14 @@ async def chat(req: ChatRequest, db: AsyncSession = Depends(get_db)) -> ChatResp
         elif event["type"] == "tool" and event.get("phase") == "end":
             cards.take(event["name"], event.get("output"))
 
+    actions: list[dict] = []
+    if agent.finalise is not None:
+        reply, actions = agent.finalise(reply)
     cards.finalise(reply)
     await _save_turn(db, session_id, req.message, reply)
     if agent.remember is not None:
         await agent.remember(session_id, req.message, reply)
-    return ChatResponse(session_id=session_id, agent=req.agent, reply=reply, **cards.as_dict())
+    return ChatResponse(session_id=session_id, agent=req.agent, reply=reply, actions=actions, **cards.as_dict())
 
 
 @router.post("/chat/stream")
@@ -161,7 +167,8 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
       outfit  - {items[], total, budget,  a complete look, plus the variants the
                  within_budget, cart_items[]}  storefront should add to the bag
       done    - {"session_id", "reply",   the finished reply, repeating whatever
-                 products?, outfit?}      cards were produced
+                 actions[], products?,    cards were produced; actions are chips
+                 outfit?}                 (follow-up questions) and links
       error   - {"message"}               the turn failed; nothing was saved
     """
     agent = _resolve_agent(req.agent)
@@ -191,6 +198,9 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
             yield _sse("error", {"message": "The agent hit an error. Please try again."})
             return
 
+        actions: list[dict] = []
+        if agent.finalise is not None:
+            reply, actions = agent.finalise(reply)
         async with AsyncSessionLocal() as db:
             await _save_turn(db, session_id, req.message, reply)
         if agent.remember is not None:
@@ -200,6 +210,6 @@ async def chat_stream(req: ChatRequest) -> StreamingResponse:
         cards.finalise(reply)
         for name, payload in cards.as_dict().items():
             yield _sse(name, payload)
-        yield _sse("done", {"session_id": session_id, "reply": reply, **cards.as_dict()})
+        yield _sse("done", {"session_id": session_id, "reply": reply, "actions": actions, **cards.as_dict()})
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)

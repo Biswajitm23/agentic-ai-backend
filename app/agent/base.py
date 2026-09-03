@@ -35,6 +35,8 @@ AgentRunner = Callable[[str, ChatHistory], Awaitable[str]]
 AgentStreamer = Callable[[str, ChatHistory], AsyncIterator[AgentEvent]]
 # (session_id, user message, reply) -> stores the turn in the agent's long-term memory
 AgentRemember = Callable[[str, str, str], Awaitable[None]]
+# raw reply -> (reply to show and save, structured actions for the client to render)
+AgentFinalise = Callable[[str], tuple[str, list[dict]]]
 
 
 @dataclass(frozen=True)
@@ -48,6 +50,9 @@ class Agent:
     stream: AgentStreamer
     # Optional: called after a turn is saved so an agent can keep long-term memory.
     remember: AgentRemember | None = None
+    # Optional: strips machine-readable extras (suggested follow-ups, links) out
+    # of the reply text so the client can render them as buttons.
+    finalise: AgentFinalise | None = None
 
 
 def build_llm(temperature: float = 0.2, max_tokens: int | None = None) -> ChatOpenAI:

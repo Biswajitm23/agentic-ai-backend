@@ -24,6 +24,7 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "variant_title": "VARCHAR(200)",
         "shopify_product_id": "VARCHAR(64)",
         "shopify_variant_id": "VARCHAR(64)",
+        "handle": "VARCHAR(255)",
         "has_cost": "BOOLEAN DEFAULT TRUE",
         "source": "VARCHAR(16) DEFAULT 'seed'",
     },
@@ -49,6 +50,7 @@ ADDED_COLUMNS: dict[str, dict[str, str]] = {
         "utm_campaign": "VARCHAR(200)",
         "utm_source": "VARCHAR(100)",
         "utm_medium": "VARCHAR(100)",
+        "shopify_order_id": "VARCHAR(64)",
         "source": "VARCHAR(16) DEFAULT 'seed'",
     },
     "ops_tasks": {
