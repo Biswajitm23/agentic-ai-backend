@@ -45,12 +45,27 @@ class Settings(BaseSettings):
     # Proxy signature, say), or for a closed demo.
     TRUST_STOREFRONT_CUSTOMER: bool = False
 
+    # Letting a shopper cancel an order or move its delivery address from the
+    # chat. These are writes - one refunds money, the other redirects a paid-for
+    # parcel - so they are gated harder than a status lookup. Leave the
+    # verification on unless the request itself is authenticated: an order number
+    # and an email are both guessable, and together they are a weak secret.
+    SUPPORT_ORDER_CHANGES: bool = True
+    SUPPORT_VERIFY_ORDER_CHANGES: bool = True
+    SUPPORT_CHANGE_TTL_MINUTES: int = 15
+    SUPPORT_CHANGE_MAX_ATTEMPTS: int = 3
+    # Past this, a cancellation is really a return, and a human should handle it.
+    SUPPORT_CANCEL_WINDOW_DAYS: int = 14
+
     # Shopify (New Shop)
     SHOPIFY_CLIENT_ID: str = ""
     SHOPIFY_CLIENT_SECRET: str = ""
     SHOPIFY_STORE_URL: str = ""
     SHOPIFY_ACCESS_TOKEN: str = ""
-    SHOPIFY_API_VERSION: str = "2024-10"
+    # Kept level with .env.example. It is not cosmetic: orderCancel took a
+    # boolean `refund` on older versions and an OrderCancelRefundMethodInput on
+    # current ones, so a stale default here fails the cancellation at runtime.
+    SHOPIFY_API_VERSION: str = "2026-07"
 
     # Embeddings for the admin agent's RAG memory (pgvector). Any OpenAI-compatible
     # /embeddings endpoint works; with no key set a deterministic local hashing

@@ -32,6 +32,10 @@ class Shopper:
 
 _current: ContextVar[Shopper | None] = ContextVar("current_shopper", default=None)
 
+# The conversation this turn belongs to. Order-change tickets are bound to it,
+# so a token that leaks out of one transcript cannot be spent in another.
+_session: ContextVar[str | None] = ContextVar("current_session", default=None)
+
 
 def resolve(customer, trusted_email: str | None = None) -> Shopper | None:
     """Decide who, if anyone, this request may look up.
@@ -65,3 +69,16 @@ def reset(token) -> None:
 
 def current() -> Shopper | None:
     return _current.get()
+
+
+def set_session(session_id: str | None):
+    """Bind the conversation for this turn. Returns a token for ``reset_session``."""
+    return _session.set(session_id)
+
+
+def reset_session(token) -> None:
+    _session.reset(token)
+
+
+def current_session() -> str | None:
+    return _session.get()

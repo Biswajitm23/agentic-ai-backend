@@ -15,7 +15,7 @@ import logging
 from langchain_core.tools import tool
 
 from app.db.session import AsyncSessionLocal
-from app.services import handbook, outfit, shopify_storefront
+from app.services import handbook, order_changes, outfit, shopify_storefront
 from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError
 
@@ -177,11 +177,99 @@ async def recommend_for_me() -> str:
         return _fail("recommend_for_me", exc)
 
 
+# ── Cancelling and re-addressing ───────────────────────────────────────────
+# Two steps on purpose. The first only *asks*; nothing is written until the
+# second, and the second cannot be reached without the token the first returns.
+
+
+@tool
+async def request_order_change(order_number: str, email: str, action: str) -> str:
+    """Step ONE of cancelling an order or moving its delivery address. Writes nothing.
+
+    action: "cancel" or "change_address".
+    Needs BOTH the order number and the email on the order, exactly like
+    check_order_status; found=false means they did not match.
+
+    On success returns a change_token, what the order contains, the reasons to
+    offer the shopper, and ask_shopper_for - one detail on the order they must
+    confirm before anything happens. Ask for that, the reason, and (for an
+    address) the new address, then call confirm_order_change ONCE with all of it.
+    eligible=false means the change is not possible - relay tell_customer and stop.
+    """
+    try:
+        result = await order_changes.begin(
+            order_number, email, action, session_id=identity.current_session()
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("request_order_change", exc)
+
+
+@tool
+async def confirm_order_change(
+    change_token: str,
+    verification_answer: str = "",
+    reason_code: str = "",
+    reason_text: str = "",
+    new_address: str = "",
+) -> str:
+    """Step TWO: actually cancel the order or move it. This is irreversible.
+
+    Only call once the shopper has said yes to the exact change, in words.
+
+    change_token: from request_order_change.
+    verification_answer: what they gave for ask_shopper_for.
+    reason_code: one of the "code" values that request_order_change returned.
+    reason_text: their own words - required when reason_code is "other", welcome
+      otherwise. Never invent it.
+    new_address: address changes only. A JSON object; send only the parts that
+      change, the rest is kept.
+      {"address1": "...", "address2": "...", "city": "...", "zip": "...",
+       "first_name": "...", "last_name": "...", "phone": "...",
+       "province_code": "...", "country_code": "GB"}
+
+    done=false with verification_failed means the answer was wrong - say so and
+    let them try again. Relay tell_customer either way.
+    """
+    parsed: dict = {}
+    if new_address:
+        if isinstance(new_address, dict):
+            parsed = new_address
+        else:
+            try:
+                parsed = json.loads(new_address)
+            except (TypeError, ValueError):
+                return json.dumps(
+                    {
+                        "done": False,
+                        "reason": "bad_address",
+                        "tell_customer": "Could you give me the new address again?",
+                    }
+                )
+        if not isinstance(parsed, dict):
+            parsed = {}
+
+    try:
+        result = await order_changes.commit(
+            change_token,
+            verification_answer=verification_answer,
+            reason_code=reason_code,
+            reason_text=reason_text,
+            new_address=parsed,
+            session_id=identity.current_session(),
+        )
+        return json.dumps(result, ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("confirm_order_change", exc)
+
+
 CUSTOMER_SUPPORT_TOOLS = [
     search_products,
     browse_catalogue,
     build_outfit,
     check_order_status,
+    request_order_change,
+    confirm_order_change,
     get_my_order_history,
     recommend_for_me,
     get_store_info,

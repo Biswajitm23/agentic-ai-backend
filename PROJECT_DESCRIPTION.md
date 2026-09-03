@@ -223,8 +223,38 @@ original point of confusion on the project — see §7.4.
 |---|---|
 | `read_orders` | Order status lookup — **required** |
 | `read_products` | Resolve a product name to a variant ID |
+| `write_orders` | Only if shoppers may cancel or re-address their own orders — see §7.2.1 |
 | `read_customers` | Only if the bot needs profile data — adds PII risk, skip if unused |
 | `write_draft_orders` | Only if the bot builds draft orders / payment links |
+
+#### 7.2.1 `write_orders` — what it costs you
+
+`write_orders` is the one scope on this list that lets the bot *do* something rather than
+report something. It backs two tools, `request_order_change` and `confirm_order_change`,
+which cancel an order (refunding and restocking it) or move its delivery address.
+
+That is a real blast radius, so the pair is gated well beyond a status lookup:
+
+- The order number **and** the email on the order must match, and a wrong email is
+  indistinguishable from an order that does not exist — the same non-probing behaviour as
+  `check_order_status`.
+- Nothing is written by step one. It returns a short-lived token and a **challenge**: the
+  postcode already on the order (or the order total, where there is no address). The answer
+  is never returned to the agent, only compared server-side.
+- Three wrong answers burn the ticket. It expires on its own after
+  `SUPPORT_CHANGE_TTL_MINUTES`, and it is bound to the chat session it was minted in, so a
+  token that leaks out of one transcript cannot be spent in another.
+- Cancellation is refused once an order is fulfilled or older than
+  `SUPPORT_CANCEL_WINDOW_DAYS`; an address change is refused once anything has shipped.
+- The shopper's reason — a preset code, their own words, or both — is written to the order as
+  a staff note, so a human can always see why it happened.
+
+The challenge exists because the widget sends `verified: false` on purpose. An order number
+is close to sequential and an email address leaks; together they are a weak secret. Fine for
+telling someone where their parcel is, not for redirecting it. Set
+`SUPPORT_VERIFY_ORDER_CHANGES=false` only where the request itself is authenticated (a signed
+App Proxy), and `SUPPORT_ORDER_CHANGES=false` to remove the tools entirely — at which point
+`write_orders` can come off the token too.
 
 ### 7.3 Scopes that do **not** do what they sound like
 

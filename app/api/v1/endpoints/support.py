@@ -148,6 +148,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         reply = ""
         cards = CardCollector()
         token = identity.set_current(shopper)
+        session_token = identity.set_session(session_id)
         try:
             async for event in CUSTOMER_SUPPORT_AGENT.stream(with_context(req.message, briefing), history):
                 if event["type"] == "token":
@@ -167,6 +168,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             return
         finally:
             identity.reset(token)
+            identity.reset_session(session_token)
 
         await _save_turn(session_id, req.message, reply)
         # Repeated in `done` so a client that only reads the final event still
