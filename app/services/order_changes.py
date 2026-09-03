@@ -9,12 +9,13 @@ The gate is two-step and server-side:
 1. ``begin`` finds the order the same non-probing way ``find_order`` does - the
    order number and the email must match, and a wrong email is indistinguishable
    from an order that does not exist. It checks the change is even possible, then
-   mints a short-lived ticket and returns a *challenge*: one detail printed on the
-   order that the buyer has and a guesser does not. The answer is never returned.
+   records the pending change against this conversation and returns a *challenge*:
+   one detail printed on the order that the buyer has and a guesser does not. The
+   answer is never returned, and only its hash is stored.
 
-2. ``commit`` takes the ticket and the answer. Wrong answers burn attempts, the
-   ticket dies after three, and it expires on its own after a few minutes. Only
-   then does a mutation run.
+2. ``commit`` takes the answer, and finds the pending change itself. Wrong answers
+   burn attempts, it is dropped after three, and it expires on its own after a few
+   minutes. Only then does a mutation run.
 
 Why a challenge at all: the storefront widget sends ``verified: false`` on
 purpose, because a browser posting an email proves nothing. Order numbers are
@@ -23,18 +24,25 @@ secret - fine for showing someone where their parcel is, not for moving it. The
 postcode already on the order is knowledge the buyer holds; asking for it turns
 "knows two guessable things" into "is holding the confirmation email".
 
-Tickets live in this process only. A restart or a second worker loses them, and
-a shopper simply starts again - which is why nothing irreversible is stored in
-one, only a pointer to an order that has already been matched.
+The pending change is keyed by the chat session and kept in the database, not
+handed to the agent as a token. The agent could not hold one anyway: only the
+user and assistant turns are replayed into its context, so a tool result from
+three turns ago is gone by the time the shopper says "yes" - which is exactly
+how the first version of this failed, reporting "expired" on a two-minute
+conversation. Keeping it server-side also means the secret never reaches the
+model, and the row survives the redeploy that an in-process dict would not.
 """
 
+import hashlib
 import logging
 import re
-import secrets
-import time
-from dataclasses import dataclass, field
+from datetime import datetime, timedelta, timezone
+
+from sqlalchemy import delete, select
 
 from app.core.config import settings
+from app.db.models import OrderChangeRequest
+from app.db.session import AsyncSessionLocal
 from app.services.shopify_client import ShopifyError, graphql
 from app.services.shopify_storefront import order_number_variants
 
@@ -66,6 +74,11 @@ ADDRESS_REASONS = [
 ]
 
 _REASON_CODES = {r["code"] for r in CANCEL_REASONS} | {r["code"] for r in ADDRESS_REASONS}
+
+NO_PENDING = (
+    "I have lost track of that request. Give me the order number and email again and we "
+    "can pick it straight back up."
+)
 
 # Shopify's own enum is coarse. Every one of ours is the customer asking, so the
 # shopper's actual words go in the staff note where a human will read them.
@@ -140,52 +153,73 @@ mutation SupportOrderAddress($input: OrderInput!) {
 """
 
 
-# ── Tickets ────────────────────────────────────────────────────────────────
+# ── The pending change ─────────────────────────────────────────────────────
 
 
-@dataclass
-class Ticket:
-    """One shopper, one order, one pending change, for a few minutes."""
-
-    order_id: str
-    order_name: str
-    action: str
-    email: str
-    session_id: str | None
-    challenge_kind: str
-    challenge_answer: str
-    current_address: dict
-    note: str | None
-    created_at: float = field(default_factory=time.monotonic)
-    attempts: int = 0
-    verified: bool = False
+def _hash(answer: str) -> str:
+    return hashlib.sha256(answer.encode("utf-8")).hexdigest()
 
 
-_tickets: dict[str, Ticket] = {}
+async def _save(session_id: str, **fields) -> None:
+    """One pending change per session; starting another replaces it."""
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            delete(OrderChangeRequest).where(OrderChangeRequest.session_id == session_id)
+        )
+        db.add(OrderChangeRequest(session_id=session_id, **fields))
+        await db.commit()
 
 
-def _ttl_seconds() -> float:
-    return settings.SUPPORT_CHANGE_TTL_MINUTES * 60
+async def _load(session_id: str) -> OrderChangeRequest | None:
+    """The live pending change for this session, or None once it has expired."""
+    async with AsyncSessionLocal() as db:
+        row = (
+            await db.execute(
+                select(OrderChangeRequest).where(OrderChangeRequest.session_id == session_id)
+            )
+        ).scalar_one_or_none()
+
+        if row is None:
+            return None
+
+        created = row.created_at
+        if created is not None:
+            # Postgres hands back an aware datetime, SQLite a naive one.
+            if created.tzinfo is None:
+                created = created.replace(tzinfo=timezone.utc)
+            if datetime.now(timezone.utc) - created > timedelta(
+                minutes=settings.SUPPORT_CHANGE_TTL_MINUTES
+            ):
+                await db.execute(
+                    delete(OrderChangeRequest).where(OrderChangeRequest.id == row.id)
+                )
+                await db.commit()
+                return None
+
+        db.expunge(row)
+        return row
 
 
-def _sweep() -> None:
-    """Drop anything past its life. Cheap - there are never many of these."""
-    cutoff = time.monotonic() - _ttl_seconds()
-    for token in [t for t, tk in _tickets.items() if tk.created_at < cutoff]:
-        _tickets.pop(token, None)
+async def _forget(session_id: str) -> None:
+    async with AsyncSessionLocal() as db:
+        await db.execute(
+            delete(OrderChangeRequest).where(OrderChangeRequest.session_id == session_id)
+        )
+        await db.commit()
 
 
-def _get(token: str, session_id: str | None) -> Ticket | None:
-    _sweep()
-    ticket = _tickets.get((token or "").strip())
-    if ticket is None:
-        return None
-    # A ticket belongs to the conversation it was minted in. Without this, a
-    # token that leaked out of one transcript would work in another.
-    if ticket.session_id and session_id and ticket.session_id != session_id:
-        logger.warning("Order-change ticket used from a different session")
-        return None
-    return ticket
+async def _bump_attempts(session_id: str) -> int:
+    async with AsyncSessionLocal() as db:
+        row = (
+            await db.execute(
+                select(OrderChangeRequest).where(OrderChangeRequest.session_id == session_id)
+            )
+        ).scalar_one_or_none()
+        if row is None:
+            return settings.SUPPORT_CHANGE_MAX_ATTEMPTS
+        row.attempts += 1
+        await db.commit()
+        return row.attempts
 
 
 # ── Normalising answers ────────────────────────────────────────────────────
@@ -223,10 +257,9 @@ def _challenge_for(node: dict) -> tuple[str, str, str]:
     )
 
 
-def _answer_matches(ticket: Ticket, given: str) -> bool:
-    if ticket.challenge_kind == "postcode":
-        return _norm_postcode(given) == ticket.challenge_answer
-    return _norm_money(given) == ticket.challenge_answer
+def _answer_matches(row, given: str) -> bool:
+    normalised = _norm_postcode(given) if row.challenge_kind == "postcode" else _norm_money(given)
+    return bool(normalised) and _hash(normalised) == row.challenge_hash
 
 
 # ── Eligibility ────────────────────────────────────────────────────────────
@@ -286,7 +319,7 @@ def _eligibility(node: dict, action: str) -> dict | None:
 
 
 async def begin(order_number: str, email: str, action: str, session_id: str | None = None) -> dict:
-    """Match the order, check the change is possible, and mint a ticket.
+    """Match the order, check the change is possible, and record it against the chat.
 
     Returns what the agent needs to run the conversation - the order summary, the
     reasons to offer, and the question to put to the shopper - and nothing that
@@ -324,20 +357,31 @@ async def begin(order_number: str, email: str, action: str, session_id: str | No
     if blocked:
         return {"found": True, "eligible": False, "order_number": node["name"], **blocked}
 
-    kind, answer, phrasing = _challenge_for(node)
-    token = secrets.token_urlsafe(24)
+    if not session_id:
+        # Without a session there is nowhere to hang the pending change, and the
+        # agent must not be handed a secret it cannot keep.
+        logger.error("Order change started with no chat session bound")
+        return {
+            "found": True,
+            "eligible": False,
+            "reason": "no_session",
+            "tell_customer": (
+                "I cannot take that through from here just now. Please contact us and we "
+                "will do it for you."
+            ),
+        }
 
-    _sweep()
-    _tickets[token] = Ticket(
-        order_id=node["id"],
+    kind, answer, phrasing = _challenge_for(node)
+    await _save(
+        session_id,
+        order_gid=node["id"],
         order_name=node["name"],
         action=action,
         email=given_email,
-        session_id=session_id,
         challenge_kind=kind,
-        challenge_answer=answer,
+        challenge_hash=_hash(answer),
         current_address=node.get("shippingAddress") or {},
-        note=node.get("note"),
+        order_note=node.get("note"),
     )
 
     money = node["totalPriceSet"]["shopMoney"]
@@ -345,7 +389,8 @@ async def begin(order_number: str, email: str, action: str, session_id: str | No
     return {
         "found": True,
         "eligible": True,
-        "change_token": token,
+        # Deliberately no token: the change is held against this conversation, so
+        # there is nothing for the agent to carry, lose or invent.
         "action": action,
         "order_number": node["name"],
         "placed_on": (node.get("createdAt") or "")[:10] or None,
@@ -380,14 +425,14 @@ def _reason_note(action: str, reason_code: str, reason_text: str) -> str:
     return " - ".join(parts) or "No reason given"
 
 
-def _address_input(ticket: Ticket, new_address: dict) -> dict:
+def _address_input(row, new_address: dict) -> dict:
     """Build a MailingAddressInput, keeping whatever the shopper did not change.
 
     Country and province stay as they were unless a new code is supplied: a
     shopper correcting a street name should not silently move their parcel to
     another country because a field arrived empty.
     """
-    current = ticket.current_address or {}
+    current = row.current_address or {}
     given = {k: (v or "").strip() for k, v in (new_address or {}).items() if v}
 
     address = {
@@ -405,32 +450,31 @@ def _address_input(ticket: Ticket, new_address: dict) -> dict:
 
 
 async def commit(
-    token: str,
     verification_answer: str = "",
     reason_code: str = "",
     reason_text: str = "",
     new_address: dict | None = None,
     session_id: str | None = None,
 ) -> dict:
-    """Verify the ticket, then actually cancel or move the order."""
-    ticket = _get(token, session_id)
-    if ticket is None:
+    """Verify the pending change for this conversation, then carry it out."""
+    if not session_id:
+        return {"done": False, "reason": "no_session", "tell_customer": NO_PENDING}
+
+    row = await _load(session_id)
+    if row is None:
         return {
             "done": False,
-            "reason": "expired",
-            "tell_customer": (
-                "That request has expired. Give me the order number and email again and "
-                "we can pick it back up."
-            ),
+            "reason": "nothing_pending",
+            "tell_customer": NO_PENDING,
         }
 
-    if settings.SUPPORT_VERIFY_ORDER_CHANGES and not ticket.verified:
-        if not _answer_matches(ticket, verification_answer):
-            ticket.attempts += 1
-            left = settings.SUPPORT_CHANGE_MAX_ATTEMPTS - ticket.attempts
+    if settings.SUPPORT_VERIFY_ORDER_CHANGES and not row.verified:
+        if not _answer_matches(row, verification_answer):
+            attempts = await _bump_attempts(session_id)
+            left = settings.SUPPORT_CHANGE_MAX_ATTEMPTS - attempts
             if left <= 0:
-                _tickets.pop(token, None)
-                logger.warning("Order-change ticket burned after too many attempts")
+                await _forget(session_id)
+                logger.warning("Order-change request dropped after too many attempts")
                 return {
                     "done": False,
                     "reason": "too_many_attempts",
@@ -445,20 +489,19 @@ async def commit(
                 "attempts_left": left,
                 "tell_customer": "That does not match what we have on the order - try again?",
             }
-        ticket.verified = True
 
     if reason_code and reason_code not in _REASON_CODES:
         return {"done": False, "reason": "unknown_reason_code", "reasons": CANCEL_REASONS}
 
-    note = _reason_note(ticket.action, reason_code, reason_text)
+    note = _reason_note(row.action, reason_code, reason_text)
 
     try:
-        if ticket.action == CANCEL:
-            result = await _do_cancel(ticket, note)
+        if row.action == CANCEL:
+            result = await _do_cancel(row, note)
         else:
-            result = await _do_address(ticket, note, new_address or {})
+            result = await _do_address(row, note, new_address or {})
     except (ShopifyError, KeyError, ValueError) as exc:
-        logger.warning("Order change %s failed for %s: %s", ticket.action, ticket.order_name, exc)
+        logger.warning("Order change %s failed for %s: %s", row.action, row.order_name, exc)
         return {
             "done": False,
             "reason": "store_error",
@@ -468,16 +511,16 @@ async def commit(
             ),
         }
 
-    # One ticket, one write. Spent either way, so a retry has to start over.
-    _tickets.pop(token, None)
+    # One pending change, one write. Spent either way, so a retry starts over.
+    await _forget(session_id)
     return result
 
 
-async def _do_cancel(ticket: Ticket, note: str) -> dict:
+async def _do_cancel(row, note: str) -> dict:
     data = await graphql(
         ORDER_CANCEL,
         {
-            "orderId": ticket.order_id,
+            "orderId": row.order_gid,
             "reason": SHOPIFY_CANCEL_REASON,
             "refundMethod": {"originalPaymentMethodsRefund": REFUND_ON_CANCEL},
             "restock": RESTOCK_ON_CANCEL,
@@ -488,7 +531,7 @@ async def _do_cancel(ticket: Ticket, note: str) -> dict:
     payload = data["orderCancel"]
     errors = payload.get("orderCancelUserErrors") or []
     if errors:
-        logger.warning("orderCancel rejected %s: %s", ticket.order_name, errors)
+        logger.warning("orderCancel rejected %s: %s", row.order_name, errors)
         return {
             "done": False,
             "reason": "rejected",
@@ -501,19 +544,19 @@ async def _do_cancel(ticket: Ticket, note: str) -> dict:
     return {
         "done": True,
         "action": CANCEL,
-        "order_number": ticket.order_name,
+        "order_number": row.order_name,
         # Shopify cancels asynchronously; the refund follows the queue.
         "refund_started": REFUND_ON_CANCEL,
         "tell_customer": (
-            f"Order {ticket.order_name} is cancelled. The refund goes back to your original "
+            f"Order {row.order_name} is cancelled. The refund goes back to your original "
             "payment method and usually lands within a few working days - you will get an "
             "email confirming it."
         ),
     }
 
 
-async def _do_address(ticket: Ticket, note: str, new_address: dict) -> dict:
-    address = _address_input(ticket, new_address)
+async def _do_address(row, note: str, new_address: dict) -> dict:
+    address = _address_input(row, new_address)
     if not address.get("address1"):
         return {
             "done": False,
@@ -521,14 +564,14 @@ async def _do_address(ticket: Ticket, note: str, new_address: dict) -> dict:
             "tell_customer": "I need the new address before I can move it.",
         }
 
-    existing = (ticket.note or "").strip()
+    existing = (row.order_note or "").strip()
     trail = f"Delivery address changed by the shopper in chat. Reason: {note}"
 
     data = await graphql(
         ORDER_UPDATE_ADDRESS,
         {
             "input": {
-                "id": ticket.order_id,
+                "id": row.order_gid,
                 "shippingAddress": address,
                 "note": f"{existing}\n{trail}".strip(),
             }
@@ -537,7 +580,7 @@ async def _do_address(ticket: Ticket, note: str, new_address: dict) -> dict:
     payload = data["orderUpdate"]
     errors = payload.get("userErrors") or []
     if errors:
-        logger.warning("orderUpdate rejected %s: %s", ticket.order_name, errors)
+        logger.warning("orderUpdate rejected %s: %s", row.order_name, errors)
         return {
             "done": False,
             "reason": "rejected",
@@ -552,7 +595,7 @@ async def _do_address(ticket: Ticket, note: str, new_address: dict) -> dict:
     return {
         "done": True,
         "action": CHANGE_ADDRESS,
-        "order_number": ticket.order_name,
+        "order_number": row.order_name,
         "new_address": ", ".join(
             p
             for p in [
@@ -564,7 +607,7 @@ async def _do_address(ticket: Ticket, note: str, new_address: dict) -> dict:
             if p
         ),
         "tell_customer": (
-            f"Done - order {ticket.order_name} will now go to the new address. It has not "
+            f"Done - order {row.order_name} will now go to the new address. It has not "
             "shipped yet, so nothing else changes."
         ),
     }

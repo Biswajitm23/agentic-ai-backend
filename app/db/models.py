@@ -140,6 +140,44 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class OrderChangeRequest(Base):
+    """A cancellation or address change a shopper has started but not confirmed.
+
+    Keyed by the chat session rather than by a token the agent carries, because
+    the agent cannot carry one: only the user and assistant turns are replayed
+    into its context, so a tool result minted three turns ago is long gone by the
+    time the shopper says "yes". Keying it server-side also means the secret
+    never enters the model's context at all.
+
+    In the database rather than in memory so it survives a redeploy - Railway
+    restarts on every push, and an in-process dict loses every pending change.
+
+    One row per session: starting a new change replaces the old one.
+    """
+
+    __tablename__ = "order_change_requests"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+
+    order_gid: Mapped[str] = mapped_column(String(128))
+    order_name: Mapped[str] = mapped_column(String(32))
+    action: Mapped[str] = mapped_column(String(20))  # cancel|change_address
+    email: Mapped[str] = mapped_column(String(255))
+
+    challenge_kind: Mapped[str] = mapped_column(String(16))  # postcode|total
+    # SHA-256 of the normalised answer. A postcode is order PII, and nothing here
+    # needs to read it back - only compare against it.
+    challenge_hash: Mapped[str] = mapped_column(String(64))
+
+    current_address: Mapped[dict] = mapped_column(JSON, default=dict)
+    order_note: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    attempts: Mapped[int] = mapped_column(Integer, default=0)
+    verified: Mapped[int] = mapped_column(Integer, default=0)
+    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
+
+
 def _embedding_column_type():
     """pgvector's Vector on Postgres; a JSON-text column on SQLite so local
     development works without the extension (see services.rag)."""

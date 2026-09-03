@@ -32,6 +32,13 @@ class Settings(BaseSettings):
     # Postgres in production (Railway sets this); SQLite is the local default.
     DATABASE_URL: str = "sqlite+aiosqlite:///./upselling.db"
     CORS_ORIGINS: list[str] = ["http://localhost:3000"]
+    # Storefronts are a moving target: every dev store is a new origin, and a
+    # browser blocks the whole request before the widget sees a reply, which
+    # surfaces as "I could not reach our support system" rather than as a CORS
+    # error anyone would recognise. So match myshopify hosts by pattern instead
+    # of listing them, and keep CORS_ORIGINS for custom domains.
+    # Set to "" to allow nothing but the list above.
+    CORS_ORIGIN_REGEX: str = r"https://[a-z0-9][a-z0-9-]*\.myshopify\.com"
 
     # LLM (DeepSeek, OpenAI-compatible)
     DEEPSEEK_API_KEY: str = ""

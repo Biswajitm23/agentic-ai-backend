@@ -17,6 +17,9 @@ CARD_TOOLS = {
     "build_outfit": "outfit",
     "get_my_order_history": "orders",
     "check_order_status": "orders",
+    # Not a card - a set of buttons. Same idea though: the shopper should be
+    # tapping a choice, not reading the agent recite seven of them.
+    "request_order_change": "choices",
 }
 MAX_CARDS = 12
 
@@ -132,6 +135,24 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
             ]
         }
 
+    if tool_name == "choices" or tool_name == "request_order_change":
+        if not data.get("eligible"):
+            return None
+        options = [
+            {"code": r["code"], "label": r["label"]}
+            for r in (data.get("reasons") or [])
+            if r.get("code") and r.get("label")
+        ]
+        if not options:
+            return None
+        return {
+            "options": options,
+            "action": data.get("action"),
+            "order_number": data.get("order_number"),
+            # There is always a way out of the list.
+            "allow_free_text": True,
+        }
+
     if tool_name == "build_outfit":
         items = data.get("outfit") or []
         if not items:
@@ -162,6 +183,7 @@ class CardCollector:
         self.products: dict | None = None
         self.outfit: dict | None = None
         self.orders: dict | None = None
+        self.choices: dict | None = None
 
     def take(self, tool_name: str, output: str | None) -> tuple[str, dict] | None:
         """Record a tool result. Returns (event_name, payload) when it had cards."""
@@ -189,6 +211,8 @@ class CardCollector:
             self.products = None
         if self.outfit is not None or self.orders is not None:
             return
+        # Choices are never reconciled against the wording: the whole point is
+        # that they do not depend on what the agent chose to say.
         if self.products is None:
             return
         items = self.products.get("items") or []
@@ -206,4 +230,6 @@ class CardCollector:
             out["outfit"] = self.outfit
         if self.orders is not None:
             out["orders"] = self.orders
+        if self.choices is not None:
+            out["choices"] = self.choices
         return out

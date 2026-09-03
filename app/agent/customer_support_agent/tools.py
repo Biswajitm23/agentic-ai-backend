@@ -190,9 +190,9 @@ async def request_order_change(order_number: str, email: str, action: str) -> st
     Needs BOTH the order number and the email on the order, exactly like
     check_order_status; found=false means they did not match.
 
-    On success returns a change_token, what the order contains, the reasons to
-    offer the shopper, and ask_shopper_for - one detail on the order they must
-    confirm before anything happens. Ask for that, the reason, and (for an
+    On success returns what the order contains, the reasons to offer the shopper,
+    and ask_shopper_for - one detail on the order they must confirm before
+    anything happens. Ask for that, the reason, and (for an
     address) the new address, then call confirm_order_change ONCE with all of it.
     eligible=false means the change is not possible - relay tell_customer and stop.
     """
@@ -207,7 +207,6 @@ async def request_order_change(order_number: str, email: str, action: str) -> st
 
 @tool
 async def confirm_order_change(
-    change_token: str,
     verification_answer: str = "",
     reason_code: str = "",
     reason_text: str = "",
@@ -216,8 +215,9 @@ async def confirm_order_change(
     """Step TWO: actually cancel the order or move it. This is irreversible.
 
     Only call once the shopper has said yes to the exact change, in words.
+    It finds the order itself, from the one request_order_change started in this
+    conversation - there is no token to keep hold of.
 
-    change_token: from request_order_change.
     verification_answer: what they gave for ask_shopper_for.
     reason_code: one of the "code" values that request_order_change returned.
     reason_text: their own words - required when reason_code is "other", welcome
@@ -251,7 +251,6 @@ async def confirm_order_change(
 
     try:
         result = await order_changes.commit(
-            change_token,
             verification_answer=verification_answer,
             reason_code=reason_code,
             reason_text=reason_text,
