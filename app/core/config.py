@@ -82,7 +82,6 @@ class Settings(BaseSettings):
     EMBEDDING_BASE_URL: str = "https://api.openai.com/v1"
     EMBEDDING_MODEL: str = "text-embedding-3-small"
     EMBEDDING_DIMENSIONS: int = 1536
-    RAG_STORE_RESULTS: int = 6
     RAG_MEMORY_RESULTS: int = 4
 
     @property

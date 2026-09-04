@@ -1,17 +1,23 @@
 """Domain analytics shared by the dashboard endpoints and the admin agent tools.
 
-Everything here reads the database only; a Shopify sync is what puts the store's
-real numbers there. Money is in the store's currency (see ``store_meta``).
+Everything here reads a live ``StoreSnapshot`` (see ``services.shopify_store``) -
+fetched fresh from Shopify on every call, never persisted. Money is in the
+store's currency (see ``StoreSnapshot.currency``).
 """
 
-from datetime import date, datetime, timedelta
+import re
+from datetime import date, datetime, timedelta, timezone
+from zoneinfo import ZoneInfo
 
-from sqlalchemy import select
-from sqlalchemy.ext.asyncio import AsyncSession
+from app.services.shopify_store import (
+    CampaignRecord,
+    OrderRecord,
+    ProductRecord,
+    StoreSnapshot,
+    fetch_store_snapshot,
+)
 
-from app.db.models import Campaign, Expense, OpsTask, Order, Product, StoreSetting
-
-DOMAINS = ("inventory", "marketing", "operations", "finance")
+DOMAINS = ("inventory", "finance", "operations", "marketing")
 RECENT_DAYS = 30
 
 # Priority-action severities, most urgent first.
@@ -20,6 +26,20 @@ SEVERITIES = ("critical", "high", "medium", "low")
 
 def _pct(part: float, whole: float) -> float:
     return round(part / whole * 100, 2) if whole else 0.0
+
+
+def _store_now(tz: str | None) -> datetime:
+    """Now, in the store's own timezone when known.
+
+    Order timestamps are naive UTC, but "today" and "the last 30 days" are day
+    boundaries the merchant reasons about in their own local time - a store on
+    America/New_York rolls into a new day, and a new 30-day window, hours
+    before UTC does.
+    """
+    try:
+        return datetime.now(ZoneInfo(tz)) if tz else datetime.now(timezone.utc)
+    except Exception:
+        return datetime.now(timezone.utc)
 
 
 def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
@@ -31,23 +51,21 @@ def _clamp(x: float, lo: float = 0.0, hi: float = 100.0) -> float:
 # --------------------------------------------------------------------------- #
 
 
-async def store_meta(db: AsyncSession) -> dict:
-    rows = (await db.execute(select(StoreSetting))).scalars().all()
-    meta = {r.key: r.value for r in rows}
+def store_meta(snapshot: StoreSnapshot) -> dict:
     return {
-        "shop_name": meta.get("shop_name"),
-        "currency": meta.get("currency") or "USD",
-        "timezone": meta.get("timezone"),
-        "last_synced_at": meta.get("last_synced_at"),
-        "campaign_source": meta.get("campaign_source") or "demo",
-        "scopes": meta.get("scopes") or [],
-        "missing_scopes": meta.get("missing_scopes") or {},
-        "storefront_url": meta.get("storefront_url"),
-        "admin_url": meta.get("admin_url"),
+        "connected": snapshot.connected,
+        "shop_name": snapshot.shop_name,
+        "currency": snapshot.currency or "USD",
+        "timezone": snapshot.timezone,
+        "campaign_source": snapshot.campaign_source or "demo",
+        "scopes": snapshot.scopes,
+        "missing_scopes": snapshot.missing_scopes,
+        "storefront_url": snapshot.storefront_url,
+        "admin_url": snapshot.admin_url,
     }
 
 
-def product_links(p: Product, storefront: str | None, admin: str | None) -> dict:
+def product_links(p: ProductRecord, storefront: str | None, admin: str | None) -> dict:
     """Where a product can be opened: the shop page for live products, the
     admin page otherwise (drafts have no public page)."""
     url = f"{storefront}/products/{p.handle}" if storefront and p.handle and p.status == "active" else None
@@ -55,23 +73,19 @@ def product_links(p: Product, storefront: str | None, admin: str | None) -> dict
     return {"url": url, "admin_url": admin_url}
 
 
-async def currency(db: AsyncSession) -> str:
-    row = await db.get(StoreSetting, "currency")
-    return (row.value if row and isinstance(row.value, str) else None) or "USD"
-
-
 # --------------------------------------------------------------------------- #
 # domain summaries
 # --------------------------------------------------------------------------- #
 
 
-async def inventory_summary(db: AsyncSession) -> dict:
-    meta = await store_meta(db)
-    products = (await db.execute(select(Product).order_by(Product.stock_qty, Product.name))).scalars().all()
+async def inventory_summary(snapshot: StoreSnapshot) -> dict:
+    meta = store_meta(snapshot)
+    products = sorted(snapshot.products, key=lambda p: (p.stock_qty, p.name))
     active = [p for p in products if p.status == "active"]
     out_of_stock = [p for p in active if p.stock_qty <= 0]
     low_stock = [p for p in active if p.stock_qty <= p.reorder_level]
     missing_cost = [p for p in active if not p.has_cost]
+    missing_sku = [p for p in active if not p.has_sku]
     retail_value = sum(p.stock_qty * p.price for p in active if p.stock_qty > 0)
     categories: dict[str, dict] = {}
     for p in active:
@@ -86,12 +100,22 @@ async def inventory_summary(db: AsyncSession) -> dict:
         "total_skus": len(active),
         "total_products": len({p.shopify_product_id or p.sku for p in active}),
         "total_units": sum(max(p.stock_qty, 0) for p in active),
-        "stock_value": round(sum(max(p.stock_qty, 0) * p.cost for p in active), 2),
+        # None (not 0) when no active SKU has a unit cost - there's nothing to sum, not a store
+        # worth ₹0. When some SKUs have a cost, this is the value of *those*, not the whole catalogue.
+        "stock_value": (
+            round(sum(max(p.stock_qty, 0) * p.cost for p in active if p.has_cost), 2)
+            if any(p.has_cost for p in active)
+            else None
+        ),
         "retail_value": round(retail_value, 2),
         "low_stock_count": len(low_stock),
         "out_of_stock_count": len(out_of_stock),
         "missing_cost_count": len(missing_cost),
-        "draft_or_archived": len(products) - len(active),
+        "missing_sku_count": len(missing_sku),
+        # Distinct products, not variant rows - `products` is one row per variant, so counting
+        # rows here would report e.g. "293 draft/archived" for what is really 101 draft products.
+        "draft_or_archived": len({p.shopify_product_id or p.sku for p in products})
+        - len({p.shopify_product_id or p.sku for p in active}),
         "categories": [{"category": k, **v} for k, v in sorted(categories.items(), key=lambda kv: -kv[1]["units"])],
         "low_stock_items": [
             {
@@ -106,6 +130,9 @@ async def inventory_summary(db: AsyncSession) -> dict:
         "products": [
             {
                 "sku": p.sku,
+                # False when `sku` is a fabricated "VAR-<id>" fallback (no SKU set in Shopify) -
+                # the UI must not present it as if it were the merchant's own SKU.
+                "has_sku": p.has_sku,
                 "name": p.name,
                 "category": p.category,
                 "vendor": p.vendor,
@@ -123,15 +150,15 @@ async def inventory_summary(db: AsyncSession) -> dict:
     }
 
 
-async def marketing_summary(db: AsyncSession) -> dict:
-    campaigns = (await db.execute(select(Campaign).order_by(Campaign.revenue.desc()))).scalars().all()
-    meta = await store_meta(db)
+async def marketing_summary(snapshot: StoreSnapshot) -> dict:
+    campaigns = sorted(snapshot.campaigns, key=lambda c: -c.revenue)
+    meta = store_meta(snapshot)
     spend = sum(c.spend for c in campaigns)
     revenue = sum(c.revenue for c in campaigns)
     clicks = sum(c.clicks for c in campaigns)
     impressions = sum(c.impressions for c in campaigns)
     conversions = sum(c.conversions for c in campaigns)
-    orders = (await db.execute(select(Order).where(Order.status != "cancelled"))).scalars().all()
+    orders = [o for o in snapshot.orders if o.status != "cancelled"]
     attributed = [o for o in orders if o.utm_campaign or o.discount_code]
     return {
         "currency": meta["currency"],
@@ -167,12 +194,13 @@ async def marketing_summary(db: AsyncSession) -> dict:
     }
 
 
-async def operations_summary(db: AsyncSession) -> dict:
-    meta = await store_meta(db)
+async def operations_summary(snapshot: StoreSnapshot) -> dict:
+    meta = store_meta(snapshot)
     admin = meta["admin_url"]
-    orders = (await db.execute(select(Order).order_by(Order.created_at.desc(), Order.id.desc()))).scalars().all()
-    tasks = (await db.execute(select(OpsTask).order_by(OpsTask.due_date))).scalars().all()
-    today = date.today()
+    orders = sorted(snapshot.orders, key=lambda o: o.created_at, reverse=True)
+    tasks = sorted(snapshot.tasks, key=lambda t: (t.due_date is None, t.due_date or date.max))
+    now_local = _store_now(meta["timezone"])
+    today = now_local.date()
     by_status: dict[str, int] = {}
     by_channel: dict[str, int] = {}
     for o in orders:
@@ -180,7 +208,8 @@ async def operations_summary(db: AsyncSession) -> dict:
         by_channel[o.channel or "web"] = by_channel.get(o.channel or "web", 0) + 1
     live = [o for o in orders if o.status != "cancelled"]
     open_orders = [o for o in live if o.status in ("pending", "processing")]
-    recent_cutoff = datetime.utcnow() - timedelta(days=RECENT_DAYS)
+    # created_at is naive UTC; convert the local cutoff back to naive UTC to compare against it.
+    recent_cutoff = (now_local - timedelta(days=RECENT_DAYS)).astimezone(timezone.utc).replace(tzinfo=None)
     recent = [o for o in live if o.created_at and o.created_at >= recent_cutoff]
     overdue = [t for t in tasks if t.status != "done" and t.due_date and t.due_date < today]
     return {
@@ -195,7 +224,11 @@ async def operations_summary(db: AsyncSession) -> dict:
         "cancellation_rate_pct": _pct(by_status.get("cancelled", 0), len(orders)),
         "orders_last_30d": len(recent),
         "revenue_last_30d": round(sum(o.total - o.refunded for o in recent), 2),
-        "avg_order_value": round(sum(o.total for o in live) / len(live), 2) if live else 0,
+        # Net of refunds, tax and shipping - order.total does not, so this wouldn't otherwise
+        # reconcile against Shopify's own AOV report (which excludes both).
+        "avg_order_value": (
+            round(sum(o.total - o.refunded - o.tax - o.shipping for o in live) / len(live), 2) if live else 0
+        ),
         "open_tasks": sum(1 for t in tasks if t.status != "done"),
         "high_priority_tasks": sum(1 for t in tasks if t.priority == "high" and t.status != "done"),
         "overdue_tasks": len(overdue),
@@ -227,20 +260,26 @@ async def operations_summary(db: AsyncSession) -> dict:
     }
 
 
-async def finance_summary(db: AsyncSession) -> dict:
-    orders = (await db.execute(select(Order).where(Order.status != "cancelled"))).scalars().all()
-    expenses = (await db.execute(select(Expense).order_by(Expense.expense_date.desc(), Expense.id.desc()))).scalars().all()
+async def finance_summary(snapshot: StoreSnapshot) -> dict:
+    orders = [o for o in snapshot.orders if o.status != "cancelled"]
+    expenses = sorted(snapshot.expenses, key=lambda e: e.expense_date, reverse=True)
+    # Whether *any* active SKU has a unit cost. When none do, every order's cogs is 0 not because
+    # goods are free but because the input is missing - cogs/gross_profit/gross_margin_pct must
+    # report as unavailable (None) rather than as a suspiciously perfect 100% margin.
+    has_cost_data = any(p.has_cost for p in snapshot.products if p.status == "active")
     gross = sum(o.total for o in orders)
     refunds = sum(o.refunded for o in orders)
     tax = sum(o.tax for o in orders)
     shipping = sum(o.shipping for o in orders)
     discounts = sum(o.discounts for o in orders)
-    cogs = sum(o.cogs for o in orders)
+    cogs_amount = sum(o.cogs for o in orders)
     total_revenue = round(gross - refunds, 2)
     net_sales = round(gross - refunds - tax - shipping, 2)
     total_expenses = round(sum(e.amount for e in expenses), 2)
     net_profit = round(total_revenue - total_expenses, 2)
-    gross_profit = round(net_sales - cogs, 2)
+    cogs = round(cogs_amount, 2) if has_cost_data else None
+    gross_profit = round(net_sales - cogs_amount, 2) if has_cost_data else None
+    gross_margin_pct = _pct(gross_profit, net_sales) if has_cost_data else None
     by_category: dict[str, float] = {}
     for e in expenses:
         by_category[e.category] = round(by_category.get(e.category, 0) + e.amount, 2)
@@ -258,7 +297,7 @@ async def finance_summary(db: AsyncSession) -> dict:
         m = monthly.setdefault(key, {"month": key, "revenue": 0.0, "orders": 0})
         m["expenses"] = round(m.get("expenses", 0.0) + e.amount, 2)
     return {
-        "currency": await currency(db),
+        "currency": snapshot.currency or "USD",
         "total_revenue": total_revenue,
         "gross_sales": round(gross, 2),
         "net_sales": net_sales,
@@ -266,9 +305,9 @@ async def finance_summary(db: AsyncSession) -> dict:
         "tax_collected": round(tax, 2),
         "shipping_collected": round(shipping, 2),
         "discounts_given": round(discounts, 2),
-        "cogs": round(cogs, 2),
+        "cogs": cogs,
         "gross_profit": gross_profit,
-        "gross_margin_pct": _pct(gross_profit, net_sales),
+        "gross_margin_pct": gross_margin_pct,
         "total_expenses": total_expenses,
         "net_profit": net_profit,
         "profit_margin_pct": _pct(net_profit, total_revenue),
@@ -283,7 +322,6 @@ async def finance_summary(db: AsyncSession) -> dict:
                 "amount": e.amount,
                 "date": e.expense_date.isoformat(),
                 "order_number": e.order_number,
-                "source": e.source,
             }
             for e in expenses[:50]
         ],
@@ -292,14 +330,15 @@ async def finance_summary(db: AsyncSession) -> dict:
 
 SUMMARY_FUNCS = {
     "inventory": inventory_summary,
-    "marketing": marketing_summary,
-    "operations": operations_summary,
     "finance": finance_summary,
+    "operations": operations_summary,
+    "marketing": marketing_summary,
 }
 
 
-async def all_summaries(db: AsyncSession) -> dict[str, dict]:
-    return {domain: await func(db) for domain, func in SUMMARY_FUNCS.items()}
+async def all_summaries(snapshot: StoreSnapshot | None = None) -> dict[str, dict]:
+    snapshot = snapshot or await fetch_store_snapshot()
+    return {domain: await func(snapshot) for domain, func in SUMMARY_FUNCS.items()}
 
 
 # --------------------------------------------------------------------------- #
@@ -316,16 +355,28 @@ def _action(
     next_step: str,
     impact: str = "",
     steps: list[str] | None = None,
+    items: list[dict] | None = None,
+    detail_prefix: str = "",
+    detail_suffix: str = "",
 ) -> dict:
+    """``detail`` is the plain-text version of "what's happening", always present.
+
+    When ``items`` (specific products) are attached, ``detail_prefix``/``detail_suffix``
+    are the text either side of them, so the dashboard can render the product
+    names inline as links instead of repeating ``detail`` as a flat string.
+    """
     return {
         "domain": domain,
         "severity": severity,
         "title": title,
         "detail": detail,
+        "detail_prefix": detail_prefix,
+        "detail_suffix": detail_suffix,
         "metric": metric,
         "next_step": next_step,
         "impact": impact,
         "steps": steps or [],
+        "items": items or [],
         "link": f"#{domain}-analysis",
     }
 
@@ -345,6 +396,7 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
     if inv["out_of_stock_count"]:
         out_items = [i for i in inv["low_stock_items"] if i["stock_qty"] <= 0]
         names = ", ".join(i["name"] for i in out_items[:6])
+        suffix = "…." if len(out_items) > 6 else "."
         actions.append(
             _action(
                 "inventory",
@@ -360,11 +412,18 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                     "For anything with no inbound stock, either reorder now or set the variant to 'Continue selling when out of stock' off and hide it.",
                     "Add a back-in-stock notification so the demand is captured, not lost.",
                 ],
+                items=[
+                    {"name": i["name"], "sku": i["sku"], "url": i.get("url"), "admin_url": i.get("admin_url")}
+                    for i in out_items[:6]
+                ],
+                detail_prefix="Shoppers can see but cannot buy: ",
+                detail_suffix=suffix,
             )
         )
     low_only = inv["low_stock_count"] - inv["out_of_stock_count"]
     if low_only > 0:
         low_items = [i for i in inv["low_stock_items"] if i["stock_qty"] > 0]
+        low_suffix = "…." if len(low_items) > 5 else "."
         actions.append(
             _action(
                 "inventory",
@@ -372,8 +431,7 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 f"{low_only} variant(s) at or below reorder level",
                 "These will sell through before a normal supplier lead time: "
                 + ", ".join(f"{i['name']} ({i['stock_qty']} left)" for i in low_items[:5])
-                + ("…" if len(low_items) > 5 else "")
-                + ".",
+                + low_suffix,
                 f"{low_only} SKUs",
                 "Reorder this week, prioritising the fastest sellers.",
                 impact="Running out mid-campaign wastes the marketing spend that drove the traffic.",
@@ -383,6 +441,17 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                     "Send purchase orders to suppliers; note expected arrival dates in Shopify.",
                     "Raise the reorder level on anything that keeps triggering this alert.",
                 ],
+                items=[
+                    {
+                        "name": f"{i['name']} ({i['stock_qty']} left)",
+                        "sku": i["sku"],
+                        "url": i.get("url"),
+                        "admin_url": i.get("admin_url"),
+                    }
+                    for i in low_items[:5]
+                ],
+                detail_prefix="These will sell through before a normal supplier lead time: ",
+                detail_suffix=low_suffix,
             )
         )
     if inv["missing_cost_count"]:
@@ -398,7 +467,7 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 steps=[
                     "In Shopify Admin go to Products → Inventory and export a CSV.",
                     "Fill the 'Cost per item' column from supplier invoices.",
-                    "Re-import the CSV, then press 'Sync store data' here.",
+                    "Re-import the CSV - the dashboard reads Shopify live, so it updates on the next load.",
                     "Check the Finance section: gross margin should now reflect real cost of goods.",
                 ],
             )
@@ -411,9 +480,9 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
                 "No active products",
                 "The catalogue is empty or every product is a draft.",
                 "0 SKUs",
-                "Publish products or sync the store.",
+                "Publish products in Shopify.",
                 impact="Nothing can be sold until at least one product is active.",
-                steps=["Open Shopify Admin → Products and set products to Active.", "Press 'Sync store data'."],
+                steps=["Open Shopify Admin → Products and set products to Active."],
             )
         )
 
@@ -667,8 +736,9 @@ def derive_priority_actions(s: dict[str, dict]) -> list[dict]:
     return actions
 
 
-async def priority_actions(db: AsyncSession) -> dict:
-    summaries = await all_summaries(db)
+async def priority_actions(snapshot: StoreSnapshot | None = None) -> dict:
+    snapshot = snapshot or await fetch_store_snapshot()
+    summaries = await all_summaries(snapshot)
     actions = derive_priority_actions(summaries)
     by_domain = {d: [a for a in actions if a["domain"] == d] for d in DOMAINS}
     return {
@@ -685,13 +755,18 @@ async def priority_actions(db: AsyncSession) -> dict:
 # --------------------------------------------------------------------------- #
 
 
-def _component(label: str, score: float, weight: float, detail: str) -> dict:
-    return {"label": label, "score": round(_clamp(score)), "weight": weight, "detail": detail}
+def _component(label: str, score: float | None, weight: float, detail: str) -> dict:
+    """``score=None`` means unmeasured (the input data doesn't exist yet, not that it scored 0) -
+    ``_weighted`` drops it from the average instead of counting it as a failing score."""
+    return {"label": label, "score": round(_clamp(score)) if score is not None else None, "weight": weight, "detail": detail}
 
 
 def _weighted(components: list[dict]) -> int:
-    total_w = sum(c["weight"] for c in components) or 1
-    return round(sum(c["score"] * c["weight"] for c in components) / total_w)
+    measured = [c for c in components if c["score"] is not None]
+    if not measured:
+        return 0
+    total_w = sum(c["weight"] for c in measured) or 1
+    return round(sum(c["score"] * c["weight"] for c in measured) / total_w)
 
 
 def _status(score: int) -> str:
@@ -739,7 +814,9 @@ def derive_health_score(s: dict[str, dict]) -> dict:
     open_tasks = ops["open_tasks"] or 0
     comps = [
         _component("Fulfilment rate", ops["fulfillment_rate_pct"], 0.5, f"{ops['fulfillment_rate_pct']}% of live orders fulfilled"),
-        _component("Backlog", 100 - min(ops["pending_orders"] * 15, 100), 0.25, f"{ops['pending_orders']} order(s) awaiting fulfilment"),
+        # Bottoms out at 20 pending orders, not 7 - a store with 8 and a store with 200 both
+        # scored a flat 0 before, with no way to tell "a bit behind" from "completely swamped".
+        _component("Backlog", 100 - min(ops["pending_orders"] * 5, 100), 0.25, f"{ops['pending_orders']} order(s) awaiting fulfilment"),
         _component("Task discipline", 100 - min(ops["overdue_tasks"] * 25 + ops["high_priority_tasks"] * 10, 100), 0.15, f"{ops['overdue_tasks']} overdue, {ops['high_priority_tasks']} high priority of {open_tasks} open"),
         _component("Cancellations", 100 - min(ops["cancellation_rate_pct"] * 5, 100), 0.1, f"{ops['cancellation_rate_pct']}% of orders cancelled"),
     ]
@@ -748,12 +825,21 @@ def derive_health_score(s: dict[str, dict]) -> dict:
     # Finance: margin, gross margin, collections
     comps = [
         _component("Net margin", max(fin["profit_margin_pct"], 0) / 20 * 100, 0.45, f"{fin['profit_margin_pct']}% net margin (20% = full marks)"),
-        _component("Gross margin", max(fin["gross_margin_pct"], 0) / 40 * 100, 0.3, f"{fin['gross_margin_pct']}% after cost of goods (40% = full marks)"),
+        _component(
+            "Gross margin",
+            max(fin["gross_margin_pct"], 0) / 40 * 100 if fin["gross_margin_pct"] is not None else None,
+            0.3,
+            f"{fin['gross_margin_pct']}% after cost of goods (40% = full marks)"
+            if fin["gross_margin_pct"] is not None
+            else "No SKU has a unit cost yet, so gross margin can't be measured",
+        ),
         _component("Collections", 100 if not fin["unpaid_orders"] else 100 - min(fin["unpaid_orders"] * 20, 100), 0.15, f"{fin['unpaid_orders']} unpaid order(s)"),
         _component("Refunds", 100 - min(_pct(fin["refunds"], fin["gross_sales"]) * 10, 100), 0.1, f"{_pct(fin['refunds'], fin['gross_sales'])}% of gross sales refunded"),
     ]
     domains["finance"] = {"score": _weighted(comps), "components": comps}
 
+    # Emit in the dashboard's canonical order: Inventory, Finance, Operations, Marketing.
+    domains = {key: domains[key] for key in DOMAINS}
     for d in domains.values():
         d["status"] = _status(d["score"])
         d["grade"] = _grade(d["score"])
@@ -765,5 +851,109 @@ def derive_health_score(s: dict[str, dict]) -> dict:
     }
 
 
-async def health_score(db: AsyncSession) -> dict:
-    return derive_health_score(await all_summaries(db))
+async def health_score(snapshot: StoreSnapshot | None = None) -> dict:
+    snapshot = snapshot or await fetch_store_snapshot()
+    return derive_health_score(await all_summaries(snapshot))
+
+
+# --------------------------------------------------------------------------- #
+# free-text lookup (used by the admin agent's search tool)
+# --------------------------------------------------------------------------- #
+
+
+def _money(amount: float | None, currency: str) -> str:
+    return f"{(amount or 0):,.2f} {currency}"
+
+
+def _product_text(p: ProductRecord, currency: str) -> str:
+    stock_state = "OUT OF STOCK" if p.stock_qty <= 0 else ("LOW STOCK" if p.stock_qty <= p.reorder_level else "in stock")
+    cost = _money(p.cost, currency) if p.has_cost else "unknown (no unit cost in Shopify)"
+    return (
+        f"Product: {p.name}. SKU {p.sku}. Category: {p.category}. Vendor: {p.vendor or 'n/a'}. "
+        f"Status: {p.status}. Price {_money(p.price, currency)}, unit cost {cost}. "
+        f"Stock {p.stock_qty} units (reorder level {p.reorder_level}) - {stock_state}."
+    )
+
+
+def _order_text(o: OrderRecord, currency: str) -> str:
+    items = "; ".join(f"{ln.quantity} x {ln.title}" + (f" [{ln.sku}]" if ln.sku else "") for ln in o.lines) or "n/a"
+    attribution = []
+    if o.utm_campaign:
+        attribution.append(f"utm campaign '{o.utm_campaign}'")
+    if o.utm_source or o.utm_medium:
+        attribution.append(f"source/medium {o.utm_source or '?'}/{o.utm_medium or '?'}")
+    if o.discount_code:
+        attribution.append(f"discount code {o.discount_code}")
+    when = o.created_at.strftime("%Y-%m-%d") if o.created_at else "unknown date"
+    return (
+        f"Order {o.order_number} placed {when} via {o.channel or 'store'}. Customer: {o.customer_name}. "
+        f"Fulfillment: {o.status}; payment: {o.financial_status or 'n/a'}. "
+        f"Total {_money(o.total, currency)} (subtotal {_money(o.subtotal, currency)}, tax {_money(o.tax, currency)}, "
+        f"shipping {_money(o.shipping, currency)}, discounts {_money(o.discounts, currency)}, refunded {_money(o.refunded, currency)}). "
+        f"Cost of goods {_money(o.cogs, currency)}. Items ({o.item_count}): {items}. "
+        f"Marketing attribution: {', '.join(attribution) or 'none (direct)'}."
+    )
+
+
+def _campaign_text(c: CampaignRecord, currency: str) -> str:
+    roas = f"{c.revenue / c.spend:.2f}x" if c.spend else "n/a (no spend recorded)"
+    how = f" Identified from Shopify orders by {c.attribution} '{c.attribution_key}'." if c.attribution else ""
+    return (
+        f"Marketing campaign: {c.name} on {c.platform}, status {c.status}. Budget {_money(c.budget, currency)}, "
+        f"spend {_money(c.spend, currency)}, impressions {c.impressions}, clicks {c.clicks}, "
+        f"conversions (orders) {c.conversions}, attributed revenue {_money(c.revenue, currency)}, ROAS {roas}.{how}"
+    )
+
+
+_SEARCH_STOPWORDS = {
+    "order", "orders", "product", "products", "sku", "campaign", "campaigns",
+    "number", "about", "the", "a", "an", "for", "of", "in", "on", "info",
+    "details", "detail", "please", "check", "know", "want", "find", "search",
+    "look", "up", "me", "is", "what", "tell", "regarding", "my",
+}
+
+
+def _search_terms(query: str) -> list[str]:
+    """The full query, plus its individual significant words as a fallback.
+
+    A caller (the admin agent) phrases queries as "order #1030" or "product
+    Suede Oxford Booties", not the bare identifier - matching only the full
+    string would miss the record entirely because "order #1030 subham das"
+    (order number + customer name) doesn't contain the word "order". Falling
+    back to per-word matching (skipping filler words) catches that.
+    """
+    q = query.strip().lower()
+    words = [w for w in re.findall(r"[\w#]+", q) if w not in _SEARCH_STOPWORDS and len(w) > 1]
+    return [q] + [w for w in words if w != q]
+
+
+def search_store(snapshot: StoreSnapshot, query: str, limit: int = 8) -> list[dict]:
+    """Case-insensitive keyword match over products, orders and campaigns.
+
+    Live keyword search over what was just fetched - no embeddings, no index to
+    keep in sync. Good enough for a catalogue this size (a few hundred SKUs, a
+    few dozen orders); a specific product/SKU/order-number/campaign lookup is
+    exactly what an admin asks the chatbot for.
+    """
+    terms = [t for t in _search_terms(query) if t]
+    if not terms:
+        return []
+
+    def matches(haystack: str) -> bool:
+        return any(t in haystack for t in terms)
+
+    currency = snapshot.currency or "USD"
+    hits: list[dict] = []
+    for p in snapshot.products:
+        haystack = f"{p.name} {p.sku} {p.category} {p.vendor or ''}".lower()
+        if matches(haystack):
+            hits.append({"kind": "product", "content": _product_text(p, currency)})
+    for o in snapshot.orders:
+        haystack = f"{o.order_number} {o.customer_name}".lower()
+        if matches(haystack):
+            hits.append({"kind": "order", "content": _order_text(o, currency)})
+    for c in snapshot.campaigns:
+        haystack = f"{c.name} {c.platform}".lower()
+        if matches(haystack):
+            hits.append({"kind": "campaign", "content": _campaign_text(c, currency)})
+    return hits[:limit]

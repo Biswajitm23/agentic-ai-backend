@@ -16,52 +16,11 @@ from app.core.config import settings
 logger = logging.getLogger(__name__)
 
 # table -> column -> DDL type + default (SQL fragments, no user input)
-ADDED_COLUMNS: dict[str, dict[str, str]] = {
-    "products": {
-        "vendor": "VARCHAR(200)",
-        "status": "VARCHAR(20) DEFAULT 'active'",
-        "product_title": "VARCHAR(200)",
-        "variant_title": "VARCHAR(200)",
-        "shopify_product_id": "VARCHAR(64)",
-        "shopify_variant_id": "VARCHAR(64)",
-        "handle": "VARCHAR(255)",
-        "has_cost": "BOOLEAN DEFAULT TRUE",
-        "source": "VARCHAR(16) DEFAULT 'seed'",
-    },
-    "campaigns": {
-        "attribution": "VARCHAR(32)",
-        "attribution_key": "VARCHAR(200)",
-        "first_order_at": "TIMESTAMP",
-        "last_order_at": "TIMESTAMP",
-        "source": "VARCHAR(16) DEFAULT 'seed'",
-    },
-    "orders": {
-        "financial_status": "VARCHAR(30)",
-        "channel": "VARCHAR(50)",
-        "subtotal": "FLOAT DEFAULT 0",
-        "tax": "FLOAT DEFAULT 0",
-        "shipping": "FLOAT DEFAULT 0",
-        "discounts": "FLOAT DEFAULT 0",
-        "refunded": "FLOAT DEFAULT 0",
-        "payment_fees": "FLOAT DEFAULT 0",
-        "cogs": "FLOAT DEFAULT 0",
-        "item_count": "INTEGER DEFAULT 0",
-        "discount_code": "VARCHAR(100)",
-        "utm_campaign": "VARCHAR(200)",
-        "utm_source": "VARCHAR(100)",
-        "utm_medium": "VARCHAR(100)",
-        "shopify_order_id": "VARCHAR(64)",
-        "source": "VARCHAR(16) DEFAULT 'seed'",
-    },
-    "ops_tasks": {
-        "domain": "VARCHAR(20) DEFAULT 'operations'",
-        "source": "VARCHAR(16) DEFAULT 'seed'",
-    },
-    "expenses": {
-        "order_number": "VARCHAR(32)",
-        "source": "VARCHAR(16) DEFAULT 'seed'",
-    },
-}
+# Empty for now: every table that used to need forward-migrated columns
+# (products/campaigns/orders/ops_tasks/expenses) was dropped when the app
+# stopped persisting Shopify data - see services.shopify_store. Add entries
+# here again if a future *persisted* table needs a new column.
+ADDED_COLUMNS: dict[str, dict[str, str]] = {}
 
 
 def _existing_columns(sync_conn) -> dict[str, set[str]]:

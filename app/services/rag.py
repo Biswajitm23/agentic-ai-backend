@@ -1,14 +1,16 @@
 """Retrieval-augmented memory for the admin agent, on pgvector.
 
-Two kinds of knowledge live in ``knowledge_chunks``:
+``knowledge_chunks`` holds two kinds of knowledge:
 
-* **Store records** - one chunk per product variant, order, campaign, expense and
-  task, written from the database after every Shopify sync (and at startup).
-  They let the agent pull the handful of records relevant to a question instead
-  of the whole catalogue.
 * **Chat memory** - one chunk per admin conversation turn (question + answer),
   so the agent can recall what staff asked and were told earlier, across
   sessions.
+* **Handbook** - the store's own handbook (see ``services.handbook``),
+  re-embedded only when the file changes.
+
+Live Shopify data (products, orders, campaigns, expenses, tasks) is fetched
+fresh from Shopify on every read instead - see ``services.shopify_store`` and
+``insights.search_store`` - so there is nothing to keep an index in sync with.
 
 On Postgres the similarity search is a pgvector cosine-distance query (with an
 HNSW index, see ``db.migrate``). On SQLite - local development only - vectors
@@ -17,7 +19,7 @@ are stored as JSON and ranked in Python, which is fine for a small store.
 
 import json
 import logging
-from collections.abc import Iterable, Sequence
+from collections.abc import Iterable
 from dataclasses import dataclass
 from datetime import datetime
 
@@ -25,13 +27,12 @@ from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from app.core.config import settings
-from app.db.models import Campaign, Expense, KnowledgeChunk, OpsTask, Order, OrderLine, Product
+from app.db.models import KnowledgeChunk
 from app.services import embeddings
 
 logger = logging.getLogger(__name__)
 
 CHAT_KIND = "chat"
-STORE_KINDS = ("product", "order", "campaign", "expense", "task")
 MAX_CHAT_CHUNK_CHARS = 1500
 
 
@@ -43,65 +44,6 @@ class Hit:
     score: float  # cosine similarity, higher is better
     session_id: str | None = None
     created_at: datetime | None = None
-
-
-# --------------------------------------------------------------------------- #
-# Turning rows into text
-# --------------------------------------------------------------------------- #
-
-
-def _money(amount: float | None, currency: str) -> str:
-    return f"{(amount or 0):,.2f} {currency}"
-
-
-def product_text(p: Product, currency: str) -> str:
-    stock_state = "OUT OF STOCK" if p.stock_qty <= 0 else ("LOW STOCK" if p.stock_qty <= p.reorder_level else "in stock")
-    cost = _money(p.cost, currency) if p.has_cost else "unknown (no unit cost in Shopify)"
-    return (
-        f"Product: {p.name}. SKU {p.sku}. Category: {p.category}. Vendor: {p.vendor or 'n/a'}. "
-        f"Status: {p.status}. Price {_money(p.price, currency)}, unit cost {cost}. "
-        f"Stock {p.stock_qty} units (reorder level {p.reorder_level}) - {stock_state}."
-    )
-
-
-def order_text(o: Order, lines: Sequence[OrderLine], currency: str) -> str:
-    items = "; ".join(f"{ln.quantity} x {ln.title}" + (f" [{ln.sku}]" if ln.sku else "") for ln in lines) or "n/a"
-    attribution = []
-    if o.utm_campaign:
-        attribution.append(f"utm campaign '{o.utm_campaign}'")
-    if o.utm_source or o.utm_medium:
-        attribution.append(f"source/medium {o.utm_source or '?'}/{o.utm_medium or '?'}")
-    if o.discount_code:
-        attribution.append(f"discount code {o.discount_code}")
-    when = o.created_at.strftime("%Y-%m-%d") if o.created_at else "unknown date"
-    return (
-        f"Order {o.order_number} placed {when} via {o.channel or 'store'}. Customer: {o.customer_name}. "
-        f"Fulfillment: {o.status}; payment: {o.financial_status or 'n/a'}. "
-        f"Total {_money(o.total, currency)} (subtotal {_money(o.subtotal, currency)}, tax {_money(o.tax, currency)}, "
-        f"shipping {_money(o.shipping, currency)}, discounts {_money(o.discounts, currency)}, refunded {_money(o.refunded, currency)}). "
-        f"Cost of goods {_money(o.cogs, currency)}. Items ({o.item_count}): {items}. "
-        f"Marketing attribution: {', '.join(attribution) or 'none (direct)'}."
-    )
-
-
-def campaign_text(c: Campaign, currency: str) -> str:
-    roas = f"{c.revenue / c.spend:.2f}x" if c.spend else "n/a (no spend recorded)"
-    how = f" Identified from Shopify orders by {c.attribution} '{c.attribution_key}'." if c.attribution else ""
-    return (
-        f"Marketing campaign: {c.name} on {c.platform}, status {c.status}. Budget {_money(c.budget, currency)}, "
-        f"spend {_money(c.spend, currency)}, impressions {c.impressions}, clicks {c.clicks}, "
-        f"conversions (orders) {c.conversions}, attributed revenue {_money(c.revenue, currency)}, ROAS {roas}.{how}"
-    )
-
-
-def expense_text(e: Expense, currency: str) -> str:
-    ref = f" (order {e.order_number})" if e.order_number else ""
-    return f"Expense on {e.expense_date.isoformat()}: {e.category} - {e.description}{ref}: {_money(e.amount, currency)}."
-
-
-def task_text(t: OpsTask) -> str:
-    due = t.due_date.isoformat() if t.due_date else "no due date"
-    return f"{t.domain.title()} task: {t.title}. Priority {t.priority}, status {t.status.replace('_', ' ')}, due {due}."
 
 
 # --------------------------------------------------------------------------- #
@@ -139,39 +81,6 @@ async def _write_chunks(db: AsyncSession, rows: list[dict]) -> int:
         for r, v in zip(rows, vectors)
     )
     return len(rows)
-
-
-async def rebuild_store_knowledge(db: AsyncSession, currency: str = "USD") -> int:
-    """Replace every store-record chunk with fresh text from the database."""
-    await db.execute(delete(KnowledgeChunk).where(KnowledgeChunk.kind.in_(STORE_KINDS)))
-
-    rows: list[dict] = []
-    for p in (await db.execute(select(Product))).scalars():
-        rows.append({"kind": "product", "ref_id": p.sku, "content": product_text(p, currency), "meta": {"sku": p.sku}})
-
-    lines_by_order: dict[int, list[OrderLine]] = {}
-    for ln in (await db.execute(select(OrderLine))).scalars():
-        lines_by_order.setdefault(ln.order_id, []).append(ln)
-    for o in (await db.execute(select(Order))).scalars():
-        rows.append(
-            {
-                "kind": "order",
-                "ref_id": o.order_number,
-                "content": order_text(o, lines_by_order.get(o.id, []), currency),
-                "meta": {"order_number": o.order_number, "status": o.status},
-            }
-        )
-    for c in (await db.execute(select(Campaign))).scalars():
-        rows.append({"kind": "campaign", "ref_id": str(c.id), "content": campaign_text(c, currency), "meta": {"name": c.name}})
-    for e in (await db.execute(select(Expense))).scalars():
-        rows.append({"kind": "expense", "ref_id": str(e.id), "content": expense_text(e, currency), "meta": {"category": e.category}})
-    for t in (await db.execute(select(OpsTask))).scalars():
-        rows.append({"kind": "task", "ref_id": str(t.id), "content": task_text(t), "meta": {"priority": t.priority}})
-
-    count = await _write_chunks(db, rows)
-    await db.commit()
-    logger.info("Indexed %d store records for retrieval", count)
-    return count
 
 
 async def remember_chat_turn(db: AsyncSession, session_id: str, question: str, answer: str) -> None:
@@ -257,26 +166,20 @@ async def build_context(db: AsyncSession, query: str, current_session: str | Non
     """Retrieved context to hand the admin agent alongside a question.
 
     Returns an empty string when nothing relevant is stored, so the caller can
-    pass the question through untouched.
+    pass the question through untouched. Live store data is not attached here -
+    it would mean a full Shopify fetch on every single chat message whether or
+    not the question needs it; the agent pulls it on demand instead, via its
+    ``get_*_data``/``search_store_knowledge`` tools.
     """
-    store_hits = await search(db, query, kinds=STORE_KINDS, limit=settings.RAG_STORE_RESULTS, min_score=0.05)
     memory_hits = await search(db, query, kinds=[CHAT_KIND], limit=settings.RAG_MEMORY_RESULTS + 2, min_score=0.1)
     # The current session's own turns are already in chat_history.
     memory_hits = [h for h in memory_hits if h.session_id != current_session][: settings.RAG_MEMORY_RESULTS]
 
-    if not store_hits and not memory_hits:
+    if not memory_hits:
         return ""
-    parts = []
-    if store_hits:
-        parts.append("Store records matching the question:\n" + "\n".join(f"- {h.content}" for h in store_hits))
-    if memory_hits:
-        parts.append(
-            "Relevant earlier conversations with staff:\n"
-            + "\n".join(
-                f"- ({h.created_at.strftime('%Y-%m-%d') if h.created_at else 'earlier'}) {h.content}" for h in memory_hits
-            )
-        )
-    return "\n\n".join(parts)
+    return "Relevant earlier conversations with staff:\n" + "\n".join(
+        f"- ({h.created_at.strftime('%Y-%m-%d') if h.created_at else 'earlier'}) {h.content}" for h in memory_hits
+    )
 
 
 async def stats(db: AsyncSession) -> dict:

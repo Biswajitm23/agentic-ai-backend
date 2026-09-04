@@ -1,10 +1,11 @@
 """The admin agent: inventory, marketing, operations and finance for this store.
 
 Every turn is retrieval-augmented: before the model sees the question, the
-pgvector index (``services.rag``) is searched for store records and earlier staff
-conversations that match it, and those are attached as context. After a turn is
-answered, the question and reply are embedded and stored so later conversations -
-in any session - can recall them.
+pgvector index (``services.rag``) is searched for earlier staff conversations
+that match it, and those are attached as context. After a turn is answered, the
+question and reply are embedded and stored so later conversations - in any
+session - can recall them. Store data itself (products, orders, ...) is not
+retrieved this way - the agent's tools read it live from Shopify on demand.
 """
 
 import json
@@ -31,7 +32,7 @@ from app.services import rag
 
 logger = logging.getLogger(__name__)
 
-CONTEXT_HEADER = "Retrieved context (from the store's records and earlier staff conversations; verify totals with tools):"
+CONTEXT_HEADER = "Retrieved context (from earlier staff conversations; verify totals with tools):"
 
 ACTIONS_RE = re.compile(r"<<actions>>\s*(.*?)\s*<</actions>>", re.DOTALL)
 ACTIONS_OPEN = "<<actions>>"

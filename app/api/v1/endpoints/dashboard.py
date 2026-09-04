@@ -1,20 +1,20 @@
-from fastapi import APIRouter, Depends, HTTPException
-from sqlalchemy.ext.asyncio import AsyncSession
+from fastapi import APIRouter, HTTPException
 
-from app.db.session import get_db
 from app.services import insights
 from app.services.insights import SUMMARY_FUNCS
+from app.services.shopify_store import fetch_store_snapshot
 
 router = APIRouter(tags=["dashboard"])
 
 
 @router.get("/dashboard/summary")
-async def dashboard_summary(db: AsyncSession = Depends(get_db)) -> dict:
+async def dashboard_summary() -> dict:
     """Headline KPIs for all four domains, shown in the top section of the dashboard."""
-    s = await insights.all_summaries(db)
+    snapshot = await fetch_store_snapshot()
+    s = await insights.all_summaries(snapshot)
     inventory, marketing, operations, finance = s["inventory"], s["marketing"], s["operations"], s["finance"]
     return {
-        "meta": await insights.store_meta(db),
+        "meta": insights.store_meta(snapshot),
         "inventory": {
             k: inventory[k]
             for k in ("total_skus", "total_units", "stock_value", "retail_value", "low_stock_count", "out_of_stock_count", "missing_cost_count")
@@ -66,21 +66,21 @@ async def dashboard_summary(db: AsyncSession = Depends(get_db)) -> dict:
 
 
 @router.get("/dashboard/priority-actions")
-async def dashboard_priority_actions(db: AsyncSession = Depends(get_db)) -> dict:
+async def dashboard_priority_actions() -> dict:
     """Ranked, explainable actions across all four domains."""
-    return await insights.priority_actions(db)
+    return await insights.priority_actions()
 
 
 @router.get("/dashboard/health")
-async def dashboard_health(db: AsyncSession = Depends(get_db)) -> dict:
+async def dashboard_health() -> dict:
     """The business health scoreboard: per-domain and overall scores with their components."""
-    return await insights.health_score(db)
+    return await insights.health_score()
 
 
 @router.get("/analysis/{domain}")
-async def domain_analysis(domain: str, db: AsyncSession = Depends(get_db)) -> dict:
+async def domain_analysis(domain: str) -> dict:
     """Full detail for one domain, loaded when its accordion is opened."""
     func = SUMMARY_FUNCS.get(domain)
     if func is None:
         raise HTTPException(status_code=404, detail=f"Unknown domain '{domain}'")
-    return await func(db)
+    return await func(await fetch_store_snapshot())

@@ -1,129 +1,16 @@
-from datetime import date, datetime
+from datetime import datetime
 
-from sqlalchemy import JSON, Date, DateTime, Float, ForeignKey, Index, Integer, String, Text, func
+from sqlalchemy import JSON, DateTime, Index, Integer, String, Text, func
 from sqlalchemy.orm import Mapped, mapped_column
 
 from app.core.config import settings
 from app.db.base import Base
 
-# Where a row came from. Rows Shopify owns are replaced wholesale on every sync;
-# "seed" rows are demo data used only while no store is connected; "manual" rows
-# are never touched by a sync.
-SOURCE_SEED = "seed"
-SOURCE_SHOPIFY = "shopify"
-SOURCE_MANUAL = "manual"
-
-
-class Product(Base):
-    __tablename__ = "products"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(200))
-    sku: Mapped[str] = mapped_column(String(64), unique=True)
-    category: Mapped[str] = mapped_column(String(100))
-    price: Mapped[float] = mapped_column(Float)
-    cost: Mapped[float] = mapped_column(Float)
-    stock_qty: Mapped[int] = mapped_column(Integer, default=0)
-    reorder_level: Mapped[int] = mapped_column(Integer, default=10)
-    # Shopify detail (null for seeded rows)
-    vendor: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    status: Mapped[str] = mapped_column(String(20), default="active")  # active|draft|archived
-    product_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    variant_title: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    shopify_product_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    shopify_variant_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    handle: Mapped[str | None] = mapped_column(String(255), nullable=True)
-    has_cost: Mapped[bool] = mapped_column(default=True)
-    source: Mapped[str] = mapped_column(String(16), default=SOURCE_SEED)
-
-
-class Campaign(Base):
-    __tablename__ = "campaigns"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    name: Mapped[str] = mapped_column(String(200))
-    platform: Mapped[str] = mapped_column(String(50))
-    status: Mapped[str] = mapped_column(String(20), default="active")
-    budget: Mapped[float] = mapped_column(Float)
-    spend: Mapped[float] = mapped_column(Float, default=0)
-    impressions: Mapped[int] = mapped_column(Integer, default=0)
-    clicks: Mapped[int] = mapped_column(Integer, default=0)
-    conversions: Mapped[int] = mapped_column(Integer, default=0)
-    revenue: Mapped[float] = mapped_column(Float, default=0)
-    # How the campaign was identified in Shopify: utm_campaign, discount_code, or channel
-    attribution: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    attribution_key: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    first_order_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    last_order_at: Mapped[datetime | None] = mapped_column(DateTime, nullable=True)
-    source: Mapped[str] = mapped_column(String(16), default=SOURCE_SEED)
-
-
-class Order(Base):
-    __tablename__ = "orders"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    order_number: Mapped[str] = mapped_column(String(32), unique=True)
-    customer_name: Mapped[str] = mapped_column(String(200))
-    total: Mapped[float] = mapped_column(Float)
-    status: Mapped[str] = mapped_column(String(30), default="pending")  # pending|processing|fulfilled|cancelled
-    created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
-    # Shopify financial detail (all in shop currency)
-    financial_status: Mapped[str | None] = mapped_column(String(30), nullable=True)  # paid|pending|refunded|...
-    channel: Mapped[str | None] = mapped_column(String(50), nullable=True)  # web|pos|draft_order|...
-    subtotal: Mapped[float] = mapped_column(Float, default=0)
-    tax: Mapped[float] = mapped_column(Float, default=0)
-    shipping: Mapped[float] = mapped_column(Float, default=0)
-    discounts: Mapped[float] = mapped_column(Float, default=0)
-    refunded: Mapped[float] = mapped_column(Float, default=0)
-    payment_fees: Mapped[float] = mapped_column(Float, default=0)
-    cogs: Mapped[float] = mapped_column(Float, default=0)
-    item_count: Mapped[int] = mapped_column(Integer, default=0)
-    discount_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    utm_campaign: Mapped[str | None] = mapped_column(String(200), nullable=True)
-    utm_source: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    utm_medium: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    shopify_order_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    source: Mapped[str] = mapped_column(String(16), default=SOURCE_SEED)
-
-
-class OrderLine(Base):
-    __tablename__ = "order_lines"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    order_id: Mapped[int] = mapped_column(ForeignKey("orders.id", ondelete="CASCADE"), index=True)
-    sku: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    title: Mapped[str] = mapped_column(String(300))
-    quantity: Mapped[int] = mapped_column(Integer, default=1)
-    unit_price: Mapped[float] = mapped_column(Float, default=0)
-    unit_cost: Mapped[float | None] = mapped_column(Float, nullable=True)
-
-
-class OpsTask(Base):
-    __tablename__ = "ops_tasks"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    title: Mapped[str] = mapped_column(String(300))
-    priority: Mapped[str] = mapped_column(String(10), default="medium")  # low|medium|high
-    status: Mapped[str] = mapped_column(String(20), default="open")  # open|in_progress|done
-    due_date: Mapped[date | None] = mapped_column(Date, nullable=True)
-    domain: Mapped[str] = mapped_column(String(20), default="operations")
-    source: Mapped[str] = mapped_column(String(16), default=SOURCE_SEED)
-
-
-class Expense(Base):
-    __tablename__ = "expenses"
-
-    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
-    category: Mapped[str] = mapped_column(String(100))
-    description: Mapped[str] = mapped_column(String(300))
-    amount: Mapped[float] = mapped_column(Float)
-    expense_date: Mapped[date] = mapped_column(Date)
-    order_number: Mapped[str | None] = mapped_column(String(32), nullable=True)
-    source: Mapped[str] = mapped_column(String(16), default=SOURCE_SEED)
-
 
 class StoreSetting(Base):
-    """Small key/value facts about the connected store: currency, last sync, scopes."""
+    """Small key/value app settings unrelated to any Shopify data - e.g. the
+    handbook's content hash, so it's only re-embedded when the file changes
+    (see ``services.handbook``)."""
 
     __tablename__ = "store_settings"
 
@@ -193,9 +80,11 @@ def _embedding_column_type():
 class KnowledgeChunk(Base):
     """One embedded piece of knowledge the admin agent can retrieve.
 
-    ``kind`` is a store record type (product, order, campaign, expense, task) or
-    ``chat`` for a remembered admin conversation turn. Store chunks are rebuilt on
-    every Shopify sync; chat chunks accumulate as the agent is used.
+    ``kind`` is ``chat`` for a remembered admin conversation turn (accumulates as
+    the agent is used) or ``handbook`` for the store's handbook (re-embedded only
+    when the file changes, see ``services.handbook``). Live Shopify data - products,
+    orders, campaigns, expenses, tasks - is fetched fresh on every read instead of
+    being embedded here; see ``services.shopify_store``.
     """
 
     __tablename__ = "knowledge_chunks"
