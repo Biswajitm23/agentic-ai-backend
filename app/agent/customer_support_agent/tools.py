@@ -14,6 +14,7 @@ import logging
 
 from langchain_core.tools import tool
 
+from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.services import handbook, order_changes, outfit, shopify_storefront
 from app.services import shopper_identity as identity
@@ -180,8 +181,27 @@ async def browse_category(category: str) -> str:
         return _fail("browse_category", exc)
 
 
-NOT_SIGNED_IN = {
+# Two different reasons the shopper's own history is unavailable, and they need
+# different answers. When the deployment trusts the storefront's sign-in, nobody
+# to act for really does mean nobody is signed in - so say so and point at the
+# account. When it does not, the shopper may well be signed in and we simply
+# cannot use it; telling them to log in would then be wrong, and worse, they
+# would do it and nothing would change.
+
+NOT_SIGNED_IN_ASK_LOGIN = {
     "signed_in": False,
+    "reason": "not_logged_in",
+    "tell_customer": (
+        "You will need to be signed in for me to see your orders. Log in - or create an "
+        "account if you do not have one yet - and I can pick up right here. If you would "
+        "rather not, give me an order number and the email it was placed with and I can "
+        "look that one up for you."
+    ),
+}
+
+NOT_SIGNED_IN_ASK_ORDER = {
+    "signed_in": False,
+    "reason": "identity_not_trusted",
     "tell_customer": (
         "I can only pull up your order history once I know it is you. Give me an order "
         "number and the email it was placed with and I can check that order directly."
@@ -189,17 +209,25 @@ NOT_SIGNED_IN = {
 }
 
 
+def _not_signed_in() -> str:
+    if settings.TRUST_STOREFRONT_CUSTOMER:
+        return json.dumps(NOT_SIGNED_IN_ASK_LOGIN)
+    return json.dumps(NOT_SIGNED_IN_ASK_ORDER)
+
+
 @tool
 async def get_my_order_history() -> str:
     """Past orders for the shopper this chat belongs to. Takes no arguments.
 
     Only works when the storefront has signed them in and this deployment trusts
-    that; otherwise it returns signed_in=false and you should ask for an order
-    number and email instead. You cannot look up anybody else with this.
+    that. signed_in=false comes with a reason: "not_logged_in" means they are not
+    signed in, so relay tell_customer and ask them to log in or sign up;
+    "identity_not_trusted" means ask for an order number and email instead.
+    Either way relay tell_customer. You cannot look up anybody else with this.
     """
     shopper = identity.current()
     if shopper is None:
-        return json.dumps(NOT_SIGNED_IN)
+        return _not_signed_in()
     try:
         return json.dumps(await shopify_storefront.customer_orders(shopper.email), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
@@ -212,11 +240,12 @@ async def recommend_for_me() -> str:
 
     Use when a signed-in shopper asks what they might like, or for a gift for the
     same child. Returns products they do not already own, each with why it was
-    picked. Falls back to signed_in=false when there is no verified shopper.
+    picked. signed_in=false carries the same reason codes as get_my_order_history:
+    relay its tell_customer rather than writing your own.
     """
     shopper = identity.current()
     if shopper is None:
-        return json.dumps(NOT_SIGNED_IN)
+        return _not_signed_in()
     try:
         history = await shopify_storefront.customer_orders(shopper.email, limit=10)
         return json.dumps(await outfit.recommend_from_orders(history["orders"]), ensure_ascii=False)

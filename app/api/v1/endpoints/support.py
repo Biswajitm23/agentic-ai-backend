@@ -28,6 +28,7 @@ from app.agent.customer_support_agent.shopper_context import (
 )
 from app.api.v1.cards import CardCollector
 from app.services import shopify_storefront, shopper_identity as identity
+from app.services import suggestions
 from app.services.shopify_client import ShopifyError
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
@@ -257,6 +258,13 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             except Exception:  # noqa: BLE001 - show the greeting even with no collections
                 logger.warning("Could not load the welcome collections", exc_info=True)
                 welcome["collections"] = []
+            try:
+                chips = await suggestions.for_welcome()
+                welcome["suggestions"] = chips
+                yield _sse("suggestions", {"suggestions": chips})
+            except Exception:  # noqa: BLE001 - chips are a nicety, never a blocker
+                logger.warning("Could not build welcome suggestions", exc_info=True)
+                welcome["suggestions"] = []
             done_payload = {"session_id": session_id, "reply": greeting, **welcome}
             if cart_payload:
                 done_payload["cart"] = cart_payload
@@ -295,7 +303,17 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         for name, payload in cards.as_dict().items():
             yield _sse(name, payload)
 
+        try:
+            chips = await suggestions.for_turn(cards.category)
+        except Exception:  # noqa: BLE001 - never fail a reply over a chip row
+            logger.warning("Could not build suggestions for session %s", session_id, exc_info=True)
+            chips = []
+        if chips:
+            yield _sse("suggestions", {"suggestions": chips})
+
         done_payload = {"session_id": session_id, "reply": reply, **cards.as_dict()}
+        if chips:
+            done_payload["suggestions"] = chips
         if cart_payload:
             done_payload["cart"] = cart_payload
         yield _sse("done", done_payload)

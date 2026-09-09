@@ -206,12 +206,20 @@ class CardCollector:
     def __init__(self) -> None:
         self.products: dict | None = None
         self.products_whole = False
+        # What the shopper is looking at, so the follow-on chips can skip it.
+        self.category: dict | None = None
         self.outfit: dict | None = None
         self.orders: dict | None = None
         self.choices: dict | None = None
 
     def take(self, tool_name: str, output: str | None) -> tuple[str, dict] | None:
         """Record a tool result. Returns (event_name, payload) when it had cards."""
+        if tool_name == "browse_category" and output:
+            try:
+                found = json.loads(output)
+                self.category = found.get("category") if found.get("found") else None
+            except (TypeError, ValueError):
+                self.category = None
         cards = cards_from(tool_name, output)
         if cards is None:
             return None
