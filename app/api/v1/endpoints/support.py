@@ -94,7 +94,7 @@ def _resolve_session(session_id: str | None) -> str:
     return SESSION_PREFIX + uuid.uuid4().hex
 
 
-async def _load_history(session_id: str) -> list[tuple[str, str]]:
+async def _load_history(session_id: str, asking: str = "") -> list[tuple[str, str]]:
     async with AsyncSessionLocal() as db:
         rows = (
             await db.execute(
@@ -104,7 +104,38 @@ async def _load_history(session_id: str) -> list[tuple[str, str]]:
                 .limit(HISTORY_LIMIT)
             )
         ).scalars().all()
-    return [(m.role, m.content) for m in reversed(rows)]
+    return _without_repeats([(m.role, m.content) for m in reversed(rows)], asking)
+
+
+def _without_repeats(turns: list[tuple[str, str]], asking: str) -> list[tuple[str, str]]:
+    """Drop earlier turns that asked exactly what is being asked now.
+
+    A shopper who asks the same thing twice must get it looked up twice: the
+    storefront draws its cards from the tool result, so a reply copied out of the
+    transcript arrives with no products beside it. Left in, those turns are also
+    the evidence the model reasons from - four identical exchanges read as "this
+    is already answered", and by then no wording in the system prompt reliably
+    wins. Removing them takes the copy away, and the question arrives fresh.
+
+    Only exact repeats go; everything else stays, so "this" and "it" still refer
+    to what the shopper was looking at.
+    """
+    key = " ".join(asking.lower().split())
+    if not key:
+        return turns
+
+    kept: list[tuple[str, str]] = []
+    i = 0
+    while i < len(turns):
+        role, content = turns[i]
+        if role == "user" and " ".join(content.lower().split()) == key:
+            i += 1
+            while i < len(turns) and turns[i][0] != "user":
+                i += 1          # and the answer it drew, which is what gets copied
+            continue
+        kept.append((role, content))
+        i += 1
+    return kept
 
 
 async def _save_turn(session_id: str, message: str, reply: str) -> None:
@@ -218,7 +249,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
       error   - {"message"}                      the turn failed; nothing was saved
     """
     session_id = _resolve_session(req.session_id)
-    history = [] if not req.message.strip() else await _load_history(session_id)
+    history = [] if not req.message.strip() else await _load_history(session_id, req.message)
     # The briefing rides along with this turn only; history keeps the raw message.
     briefing = describe(req.cart, req.customer, req.context)
     shopper = identity.resolve(req.customer)
