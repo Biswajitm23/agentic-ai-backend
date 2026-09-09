@@ -43,6 +43,7 @@ from sqlalchemy import delete, select
 from app.core.config import settings
 from app.db.models import OrderChangeRequest
 from app.db.session import AsyncSessionLocal
+from app.services import shopify_client
 from app.services.shopify_client import ShopifyError, graphql
 from app.services.shopify_storefront import order_number_variants
 
@@ -275,6 +276,22 @@ def _days_old(created_at: str) -> float:
     return (datetime.now(timezone.utc) - placed).total_seconds() / 86400
 
 
+# Both writes - cancelling and re-addressing - need the same Shopify scope. If
+# it is absent the whole flow is theatre, so it is checked before the shopper is
+# asked for anything.
+WRITE_SCOPE = "write_orders"
+
+CANNOT_CHANGE = {
+    "found": True,
+    "eligible": False,
+    "reason": "changes_not_enabled",
+    "tell_customer": (
+        "I am not able to change orders from this chat. Let me pass you to someone on "
+        "the team who can sort it out for you."
+    ),
+}
+
+
 def _eligibility(node: dict, action: str) -> dict | None:
     """None when the change can go ahead, otherwise why it cannot."""
     if node.get("cancelledAt"):
@@ -325,6 +342,10 @@ async def begin(order_number: str, email: str, action: str, session_id: str | No
     reasons to offer, and the question to put to the shopper - and nothing that
     would help someone who has not got the order in front of them.
     """
+    if not await shopify_client.can(WRITE_SCOPE):
+        logger.warning("Order changes are on, but the token has no %s scope", WRITE_SCOPE)
+        return dict(CANNOT_CHANGE)
+
     if not settings.SUPPORT_ORDER_CHANGES:
         return {
             "available": False,

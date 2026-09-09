@@ -34,6 +34,35 @@ def graphql_url() -> str:
     return f"https://{store_domain()}/admin/api/{settings.SHOPIFY_API_VERSION}/graphql.json"
 
 
+_scopes: set[str] | None = None
+
+
+async def granted_scopes() -> set[str]:
+    """The scopes this access token really holds.
+
+    Cached for the process: they change only when the app is reinstalled, and
+    every write path asks before it starts.
+    """
+    global _scopes
+    if _scopes is None:
+        data = await graphql("{ currentAppInstallation { accessScopes { handle } } }")
+        _scopes = {s["handle"] for s in data["currentAppInstallation"]["accessScopes"]}
+    return _scopes
+
+
+async def can(scope: str) -> bool:
+    """Whether the token holds ``scope``. False if we cannot find out.
+
+    Failing closed is deliberate: the caller uses this to decide whether to
+    promise a shopper a write, and an unanswerable question is not a yes.
+    """
+    try:
+        return scope in await granted_scopes()
+    except ShopifyError:
+        logger.warning("Could not read the token's scopes; assuming %s is absent", scope)
+        return False
+
+
 async def graphql(query: str, variables: dict | None = None, client: httpx.AsyncClient | None = None) -> dict:
     """Run one GraphQL operation and return its ``data``.
 
