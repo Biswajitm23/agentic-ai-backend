@@ -11,14 +11,21 @@ projected down to what a shopper may see:
   tool cannot be used to discover which orders are real.
 """
 
+import datetime
 import logging
+import re
+import time
+from urllib.parse import quote
 
+from app.core.config import settings
 from app.services.shopify_client import ShopifyError, graphql, store_domain
 
 logger = logging.getLogger(__name__)
 
 PRODUCT_LIMIT = 10
 VARIANT_LIMIT = 10
+ORDER_SCAN_PAGE = 250      # orders per page when counting best sellers
+ORDER_SCAN_LINES = 50      # line items read per order
 
 STATUS_MEANING = {
     "UNFULFILLED": "We have your order and it is queued for packing.",
@@ -103,6 +110,19 @@ query SupportOrderStatus($query: String!) {
 }
 """
 
+CATEGORY_PRODUCTS = """
+query SupportCategoryProducts($query: String!, $first: Int!, $cursor: String) {
+  products(first: $first, after: $cursor, query: $query, sortKey: TITLE) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      productType
+      category { id name }
+      featuredMedia { ... on MediaImage { image { url } } }
+    }
+  }
+}
+"""
+
 CART_PRODUCTS = """
 query SupportCartProducts($query: String!, $first: Int!) {
   products(first: $first, query: $query) {
@@ -153,6 +173,72 @@ query SupportOrderHistory($query: String!, $first: Int!) {
             featuredMedia { ... on MediaImage { image { url } } }
           }
         }
+      }
+    }
+  }
+}
+"""
+
+BEST_SELLER_ORDERS = """
+query SupportBestSellerOrders($query: String!, $first: Int!, $lines: Int!, $cursor: String) {
+  orders(first: $first, after: $cursor, query: $query, sortKey: CREATED_AT, reverse: true) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      cancelledAt
+      test
+      lineItems(first: $lines) {
+        nodes {
+          currentQuantity
+          product { id status }
+        }
+      }
+    }
+  }
+}
+"""
+
+PRODUCTS_BY_IDS = """
+query SupportProductsByIds($ids: [ID!]!, $variants: Int!) {
+  nodes(ids: $ids) {
+    ... on Product {
+      id
+      legacyResourceId
+      title
+      handle
+      productType
+      status
+      onlineStoreUrl
+      totalInventory
+      featuredMedia { ... on MediaImage { image { url altText } } }
+      variants(first: $variants) {
+        nodes {
+          legacyResourceId
+          sku
+          title
+          price
+          compareAtPrice
+          availableForSale
+          inventoryQuantity
+          media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+        }
+      }
+    }
+  }
+}
+"""
+
+COLLECTIONS = """
+query SupportCollections($first: Int!, $query: String) {
+  collections(first: $first, query: $query, sortKey: UPDATED_AT, reverse: true) {
+    nodes {
+      id
+      handle
+      title
+      description
+      image { url altText }
+      productsCount { count }
+      products(first: 1) {
+        nodes { featuredMedia { ... on MediaImage { image { url } } } }
       }
     }
   }
@@ -382,6 +468,328 @@ async def customer_orders(email: str, limit: int = 5) -> dict:
     return {"found": bool(orders), "count": len(orders), "orders": orders}
 
 
+def _fresh(stamped: tuple | None, minutes: int) -> bool:
+    """True while a cached (timestamp, value) pair is still worth reusing."""
+    return bool(stamped) and time.monotonic() - stamped[0] < max(0, minutes) * 60
+
+
+# ── Categories ─────────────────────────────────────────────────────────────
+# A category here is the product type Shopify already stores on each product -
+# Dress, Boots, Romper. Shopify gives a product type no id of its own, so the id
+# below is a slug derived from the name: stable, url-safe, and what a client
+# sends back to filter by. Where the products also carry Shopify's own taxonomy
+# category, its real id and name ride along beside it.
+
+# One entry: the whole grouping. `limit` only slices it, so asking for five
+# categories must not send the scan round again.
+_categories_cache: tuple[float, list[dict]] | None = None
+
+CATEGORY_SCAN_PAGE = 250   # products per page while grouping
+CATEGORY_SCAN_PAGES = 8    # ...so at most 2000 products are looked at
+CATEGORY_LIMIT = 60        # most a caller may ask for
+
+_SLUG_RE = re.compile(r"[^a-z0-9]+")
+
+
+def slugify(name: str) -> str:
+    return _SLUG_RE.sub("-", name.lower()).strip("-")
+
+
+def category_url(product_type: str) -> str:
+    """The store's own catalogue, filtered to this product type."""
+    return (f"https://{store_domain()}/collections/all"
+            f"?filter.p.product_type={quote(product_type)}")
+
+
+def _pick_taxonomy(counts: dict) -> tuple:
+    """The Shopify taxonomy category most of this type's products agree on."""
+    return max(counts, key=counts.get) if counts else (None, None)
+
+
+async def categories(limit: int = CATEGORY_LIMIT) -> dict:
+    """Every category a shopper can actually buy from, with a picture for each.
+
+    Grouped from ACTIVE products only, so a draft or archived line never raises a
+    category tile that leads nowhere. Biggest categories come first. The picture
+    is the first product in the category that has one, taken in a fixed order so
+    a tile does not change image between calls.
+    """
+    limit = max(1, min(limit, CATEGORY_LIMIT))
+    ranked = await _grouped_categories()
+    chosen = ranked[:limit]
+    return {"count": len(chosen), "total": len(ranked), "categories": chosen}
+
+
+async def _grouped_categories() -> list[dict]:
+    """Every category, best first. Cached whole; callers take the slice they need."""
+    global _categories_cache
+    if _fresh(_categories_cache, settings.SUPPORT_CATEGORY_CACHE_MINUTES):
+        return _categories_cache[1]
+
+    groups: dict[str, dict] = {}
+    cursor: str | None = None
+
+    for _ in range(CATEGORY_SCAN_PAGES):
+        page = (
+            await graphql(
+                CATEGORY_PRODUCTS,
+                {"query": "status:ACTIVE", "first": CATEGORY_SCAN_PAGE, "cursor": cursor},
+            )
+        )["products"]
+
+        for node in page["nodes"]:
+            name = (node.get("productType") or "").strip()
+            if not name:
+                continue                    # uncategorised: nothing to draw a tile for
+            group = groups.setdefault(name, {"count": 0, "image": None, "taxonomy": {}})
+            group["count"] += 1
+            if group["image"] is None:
+                image = (node.get("featuredMedia") or {}).get("image") or {}
+                if image.get("url"):
+                    group["image"] = image["url"]
+            taxon = node.get("category")
+            if taxon and taxon.get("id"):
+                key = (taxon["id"], taxon.get("name"))
+                group["taxonomy"][key] = group["taxonomy"].get(key, 0) + 1
+
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+
+    ranked = sorted(groups.items(), key=lambda kv: (-kv[1]["count"], kv[0]))
+
+    out = []
+    used: set[str] = set()
+    for name, group in ranked:
+        # Two type names could in principle slug to the same thing, and a client
+        # keys on the id, so it has to stay unique.
+        base = slugify(name) or "category"
+        ident, n = base, 2
+        while ident in used:
+            ident, n = f"{base}-{n}", n + 1
+        used.add(ident)
+
+        taxon_id, taxon_name = _pick_taxonomy(group["taxonomy"])
+        out.append(
+            {
+                "id": ident,
+                "name": name,
+                "image": group["image"],
+                "image_alt": name,
+                "url": category_url(name),
+                "product_count": group["count"],
+                "taxonomy_id": taxon_id,
+                "taxonomy_name": taxon_name,
+            }
+        )
+
+    _categories_cache = (time.monotonic(), out)
+    return out
+
+
+# ── Collections ────────────────────────────────────────────────────────────
+
+_collections_cache: dict[tuple[int, tuple[str, ...]], tuple[float, dict]] = {}
+
+COLLECTION_SCAN = 250      # how many collections to look at before ranking them
+COLLECTION_LIMIT = 100     # most a caller may ask for
+
+
+def collection_url(handle: str) -> str:
+    return f"https://{store_domain()}/collections/{handle}"
+
+
+def _public_collection(node: dict) -> dict:
+    """A collection as a card: a name, a picture and somewhere to click.
+
+    ``id``/``name`` are the same fields /support/categories returns, so a client
+    can draw either kind of tile with one component. ``handle``/``title`` are
+    kept beside them because that is what Shopify calls these and what the
+    welcome screen already sends.
+
+    Falls back to the first product's photo when the collection has no image of
+    its own, so the storefront never has to draw an empty tile.
+    """
+    image = (node.get("image") or {}).get("url")
+    if not image:
+        first = (node.get("products") or {}).get("nodes") or []
+        if first:
+            image = ((first[0].get("featuredMedia") or {}).get("image") or {}).get("url")
+    return {
+        "id": node["handle"],
+        "name": node["title"],
+        "handle": node["handle"],
+        "title": node["title"],
+        "image": image,
+        "image_alt": node["title"],
+        "url": collection_url(node["handle"]),
+        "product_count": (node.get("productsCount") or {}).get("count") or 0,
+    }
+
+
+async def collections(limit: int = 8, handles: list[str] | None = None) -> dict:
+    """Collections to offer a shopper who has not asked for anything yet.
+
+    ``handles`` pins an exact, ordered list - what the merchant wants shown.
+    Without it they come back alphabetically, which is the order the store's own
+    /collections page uses, so the widget and the storefront agree. Empty
+    collections are never offered: they are a dead end.
+    """
+    limit = max(1, min(limit, COLLECTION_LIMIT))
+    wanted = tuple(h.strip() for h in (handles or []) if h and h.strip())
+
+    key = (limit, wanted)
+    if _fresh(_collections_cache.get(key), settings.SUPPORT_WELCOME_CACHE_MINUTES):
+        return _collections_cache[key][1]
+
+    query = (" OR ".join(f"handle:{h}" for h in wanted) if wanted
+             else "published_status:published")
+    data = await graphql(
+        COLLECTIONS,
+        {"first": max(len(wanted) * 2, COLLECTION_SCAN) if wanted else COLLECTION_SCAN, "query": query},
+    )
+    found = [_public_collection(n) for n in data["collections"]["nodes"] if (n.get("productsCount") or {}).get("count")]
+
+    if wanted:
+        # Shopify answers a handle search in its own order; the merchant's order
+        # is the one that matters here.
+        by_handle = {c["handle"]: c for c in found}
+        chosen = [by_handle[h] for h in wanted if h in by_handle][:limit]
+    else:
+        chosen = sorted(found, key=lambda c: c["name"].casefold())[:limit]
+
+    result = {"count": len(chosen), "total": len(found), "collections": chosen}
+    _collections_cache[key] = (time.monotonic(), result)
+    return result
+
+
+# ── Best sellers ───────────────────────────────────────────────────────────
+# Shopify's Admin API has no "best selling" sort for products, so the ranking is
+# counted here from what has actually been ordered. It is the most expensive read
+# the agent can make, so the answer is cached for everyone rather than recomputed
+# per shopper.
+
+_best_sellers_cache: dict[tuple[int, int], tuple[float, dict]] = {}
+_order_tally_cache: dict[int, tuple[float, tuple[dict, dict, int]]] = {}
+
+
+def _order_scan_window(days: int) -> str:
+    since = datetime.date.today() - datetime.timedelta(days=max(1, days))
+    return f"created_at:>={since.isoformat()}"
+
+
+async def _count_units_sold(days: int) -> tuple[dict[str, int], dict[str, int], int]:
+    """Tally units per product id across recent orders.
+
+    Returns (units, orders_containing, orders_scanned). Only line items whose
+    product still exists and is ACTIVE are counted, which drops archived and
+    deleted lines out of the ranking on its own. ``currentQuantity`` is what is
+    left on the line after refunds and removals, so a returned item stops
+    counting as a sale.
+    """
+    units: dict[str, int] = {}
+    appearances: dict[str, int] = {}
+    scanned = 0
+    cursor: str | None = None
+    query = _order_scan_window(days)
+
+    for _ in range(max(1, settings.SUPPORT_BEST_SELLER_ORDER_PAGES)):
+        page = (
+            await graphql(
+                BEST_SELLER_ORDERS,
+                {"query": query, "first": ORDER_SCAN_PAGE, "lines": ORDER_SCAN_LINES, "cursor": cursor},
+            )
+        )["orders"]
+
+        for order in page["nodes"]:
+            scanned += 1
+            if order.get("cancelledAt"):
+                continue
+            if order.get("test") and not settings.SUPPORT_BEST_SELLERS_COUNT_TEST_ORDERS:
+                continue
+            in_this_order = set()
+            for line in order["lineItems"]["nodes"]:
+                product = line.get("product")
+                if not product or product.get("status") != "ACTIVE":
+                    continue
+                quantity = line.get("currentQuantity") or 0
+                if quantity <= 0:
+                    continue
+                units[product["id"]] = units.get(product["id"], 0) + quantity
+                in_this_order.add(product["id"])
+            for pid in in_this_order:
+                appearances[pid] = appearances.get(pid, 0) + 1
+
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+
+    return units, appearances, scanned
+
+
+async def best_sellers(limit: int = 5, days: int | None = None) -> dict:
+    """The products ordered most often, newest ``days`` of orders, best first.
+
+    Counted from real orders rather than from a tag, so it stays true as the
+    store sells. Products are returned in the same shape as a search result, plus
+    ``units_sold`` and ``orders`` so the agent can say how popular something is.
+    """
+    limit = max(1, min(limit, PRODUCT_LIMIT))
+    days = settings.SUPPORT_BEST_SELLER_DAYS if days is None else max(1, days)
+
+    key = (limit, days)
+    if _fresh(_best_sellers_cache.get(key), settings.SUPPORT_BEST_SELLER_CACHE_MINUTES):
+        return _best_sellers_cache[key][1]
+
+    # The order scan does not depend on how many products were asked for, so it
+    # is cached per window and shared by every limit.
+    if _fresh(_order_tally_cache.get(days), settings.SUPPORT_BEST_SELLER_CACHE_MINUTES):
+        units, appearances, scanned = _order_tally_cache[days][1]
+    else:
+        units, appearances, scanned = await _count_units_sold(days)
+        _order_tally_cache[days] = (time.monotonic(), (units, appearances, scanned))
+    currency = (await shop_info())["currency"]
+
+    if not units:
+        result = {
+            "found": False,
+            "reason": "no_sales_yet",
+            "days": days,
+            "orders_scanned": scanned,
+            "currency": currency,
+            "count": 0,
+            "products": [],
+        }
+        _best_sellers_cache[key] = (time.monotonic(), result)
+        return result
+
+    # Most units first; a tie goes to the product that appeared in more orders,
+    # which is the better signal of breadth over one large basket.
+    ranked = sorted(units, key=lambda pid: (-units[pid], -appearances.get(pid, 0)))[:limit]
+
+    data = await graphql(PRODUCTS_BY_IDS, {"ids": ranked, "variants": VARIANT_LIMIT})
+    by_id = {n["id"]: n for n in data["nodes"] if n and n.get("status") == "ACTIVE"}
+
+    products = []
+    for rank, pid in enumerate((p for p in ranked if p in by_id), start=1):
+        card = _public_product(by_id[pid], currency)
+        card["rank"] = rank
+        card["units_sold"] = units[pid]
+        card["orders"] = appearances.get(pid, 0)
+        products.append(card)
+
+    result = {
+        "found": bool(products),
+        "days": days,
+        "orders_scanned": scanned,
+        "currency": currency,
+        "count": len(products),
+        "products": products,
+    }
+    _best_sellers_cache[key] = (time.monotonic(), result)
+    return result
+
+
 async def cart_cards(lines: list[dict], currency: str | None = None) -> list[dict]:
     """Give the shopper's own cart lines a picture and a link.
 
@@ -436,5 +844,198 @@ def minor_to_major(value) -> float | None:
         return None
 
 
-__all__ = ["ShopifyError", "cart_cards", "customer_orders", "minor_to_major", "order_line_card", "find_order", "product_image", "product_url",
+# ── One category's products ────────────────────────────────────────────────
+# A client draws tiles from /categories and from the welcome collections, so a
+# shopper can arrive holding any of four things: the slug id of a product type,
+# a collection handle, a numeric collection id, or just the words they typed.
+# All four have to reach the same products, so the reference is resolved here
+# rather than in the tool, and the caller never has to know which kind it was.
+
+CATEGORY_PRODUCT_LIMIT = 24    # most products one category may return
+CATEGORY_SUGGESTIONS = 12      # categories offered back when the name misses
+
+_DIGITS_RE = re.compile(r"^\d+$")
+_COLLECTION_GID_RE = re.compile(r"^gid://shopify/Collection/(\d+)$", re.I)
+
+COLLECTION_LOOKUP = """
+query SupportCollectionLookup($query: String!, $first: Int!) {
+  collections(first: $first, query: $query) {
+    nodes { legacyResourceId handle title image { url altText } productsCount { count } }
+  }
+}
+"""
+
+COLLECTION_BY_ID = """
+query SupportCollectionById($id: ID!) {
+  collection(id: $id) {
+    legacyResourceId handle title image { url altText } productsCount { count }
+  }
+}
+"""
+
+
+# RELEVANCE ranks against a search term, and a category browse has none: with a
+# bare collection_id filter Shopify answers it with nothing at all. Alphabetical
+# is both correct here and stable, so a grid keeps its order between calls.
+CATEGORY_PRODUCT_LIST = """
+query SupportCategoryProductList($query: String!, $first: Int!, $variants: Int!) {
+  products(first: $first, query: $query, sortKey: TITLE) {
+    nodes {
+      legacyResourceId
+      title
+      handle
+      productType
+      onlineStoreUrl
+      totalInventory
+      featuredMedia { ... on MediaImage { image { url altText } } }
+      variants(first: $variants) {
+        nodes {
+          legacyResourceId
+          sku
+          title
+          price
+          compareAtPrice
+          availableForSale
+          inventoryQuantity
+          media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+        }
+      }
+    }
+  }
+}
+"""
+
+
+def _quoted(value: str) -> str:
+    """A value safe to sit inside double quotes in a Shopify search query."""
+    return value.replace("\\", "\\\\").replace('"', '\\"')
+
+
+def _type_as_category(entry: dict) -> dict:
+    """A product-type category, plus the filter that finds its products.
+
+    The listing calls the type name; product_type is only carried when a
+    caller kept it, so the name is what this trusts.
+    """
+    product_type = entry.get("product_type") or entry["name"]
+    return {
+        **entry,
+        "kind": "product_type",
+        "filter": f'product_type:"{_quoted(product_type)}"',
+    }
+
+
+def _collection_as_category(node: dict) -> dict:
+    """A collection wearing the same shape as a product-type category."""
+    image = node.get("image") or {}
+    return {
+        "id": node["handle"],
+        "name": node["title"],
+        "kind": "collection",
+        "image": image.get("url"),
+        "image_alt": image.get("altText") or node["title"],
+        "url": collection_url(node["handle"]),
+        "product_count": (node.get("productsCount") or {}).get("count") or 0,
+        "filter": f'collection_id:{node["legacyResourceId"]}',
+    }
+
+
+async def _collection_named(term: str) -> dict | None:
+    """A collection from a numeric id, a handle, or its name."""
+    gid = _COLLECTION_GID_RE.match(term)
+    numeric = gid.group(1) if gid else (term if _DIGITS_RE.match(term) else None)
+    if numeric:
+        node = (
+            await graphql(COLLECTION_BY_ID, {"id": f"gid://shopify/Collection/{numeric}"})
+        )["collection"]
+        return _collection_as_category(node) if node else None
+
+    slug = slugify(term)
+    for search in (f"handle:{slug}", f'title:"{_quoted(term)}"'):
+        nodes = (
+            await graphql(COLLECTION_LOOKUP, {"query": search, "first": 5})
+        )["collections"]["nodes"]
+        # Shopify answers a title search loosely, so prefer a real match over
+        # merely the first thing it offered.
+        exact = [
+            n for n in nodes
+            if n["handle"].lower() == slug or n["title"].strip().lower() == term.lower()
+        ]
+        chosen = exact or nodes
+        if chosen:
+            return _collection_as_category(chosen[0])
+    return None
+
+
+async def find_category(reference: str) -> dict | None:
+    """The category a shopper meant, whatever they called it.
+
+    Product types are tried first: they are what ``/categories`` hands a client,
+    so an id coming back is far likelier to be one of those than a collection.
+    """
+    term = " ".join((reference or "").split()).strip()
+    if not term:
+        return None
+    lowered, slug = term.lower(), slugify(term)
+
+    listed = await _grouped_categories()
+    for entry in listed:
+        names = (entry["id"].lower(), entry["name"].lower(), (entry.get("product_type") or "").lower())
+        if lowered in names or (entry.get("taxonomy_id") and term == entry["taxonomy_id"]):
+            return _type_as_category(entry)
+    # "dresses" should still reach "dress"; two letters would match far too much.
+    if len(slug) >= 3:
+        for entry in listed:
+            if slug.startswith(entry["id"]) or entry["id"].startswith(slug):
+                return _type_as_category(entry)
+
+    try:
+        return await _collection_named(term)
+    except (ShopifyError, KeyError, ValueError):
+        logger.warning("Collection lookup failed for %r", term, exc_info=True)
+        return None
+
+
+async def category_products(category: str, limit: int = 12) -> dict:
+    """Everything buyable in one category, for a shopper who named or tapped it.
+
+    Only ACTIVE products, like every other read here. found=false carries the
+    categories that do exist, so a caller can offer real ones rather than
+    apologising into a void.
+    """
+    limit = max(1, min(limit, CATEGORY_PRODUCT_LIMIT))
+    found = await find_category(category)
+    if found is None:
+        listed = await _grouped_categories()
+        return {
+            "found": False,
+            "asked_for": category,
+            "reason": "no_such_category",
+            "categories": [
+                {"id": c["id"], "name": c["name"], "product_count": c["product_count"]}
+                for c in listed[:CATEGORY_SUGGESTIONS]
+            ],
+        }
+
+    currency = (await shop_info())["currency"]
+    data = await graphql(
+        CATEGORY_PRODUCT_LIST,
+        {
+            "query": f'{found["filter"]} AND status:ACTIVE',
+            "first": limit,
+            "variants": VARIANT_LIMIT,
+        },
+    )
+    products = [_public_product(node, currency) for node in data["products"]["nodes"]]
+    return {
+        "found": True,
+        "category": {k: found[k] for k in ("id", "name", "kind", "image", "url", "product_count")},
+        "currency": currency,
+        "count": len(products),
+        "more_available": len(products) == limit,
+        "products": products,
+    }
+
+
+__all__ = ["ShopifyError", "best_sellers", "cart_cards", "categories", "category_products", "find_category", "category_url", "collections", "collection_url", "customer_orders", "minor_to_major", "order_line_card", "find_order", "product_image", "product_url",
            "search_products", "shop_info", "variant_image"]

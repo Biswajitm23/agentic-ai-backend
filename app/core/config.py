@@ -64,6 +64,30 @@ class Settings(BaseSettings):
     # Past this, a cancellation is really a return, and a human should handle it.
     SUPPORT_CANCEL_WINDOW_DAYS: int = 14
 
+    # Best sellers are counted from real orders, because the Admin API has no
+    # best-selling sort for products. The scan is capped so one chat can never
+    # walk the whole order history, and the answer is cached for everyone.
+    SUPPORT_BEST_SELLER_DAYS: int = 365
+    SUPPORT_BEST_SELLER_ORDER_PAGES: int = 8      # x250 orders = 2000 scanned at most
+    SUPPORT_BEST_SELLER_CACHE_MINUTES: int = 15
+    # Orders paid through Shopify's test gateway. A live store should leave this
+    # off; a demo or dev store has nothing else to rank and needs it on.
+    SUPPORT_BEST_SELLERS_COUNT_TEST_ORDERS: bool = True
+
+    # The opening screen. A support chat call with an empty message is the
+    # storefront widget saying "a shopper just opened me" - it gets a greeting
+    # and a set of collections to tap instead of a trip through the agent.
+    # Leave the message blank to greet with the store's own name.
+    SUPPORT_WELCOME_MESSAGE: str = ""
+    # Exact collections to offer, by handle, in this order. Empty means pick the
+    # fullest ones automatically.
+    SUPPORT_WELCOME_COLLECTIONS: str = ""
+    SUPPORT_WELCOME_COLLECTION_LIMIT: int = 8
+    SUPPORT_WELCOME_CACHE_MINUTES: int = 30
+
+    # Categories are grouped from the live catalogue, which barely moves.
+    SUPPORT_CATEGORY_CACHE_MINUTES: int = 30
+
     # Shopify (New Shop)
     SHOPIFY_CLIENT_ID: str = ""
     SHOPIFY_CLIENT_SECRET: str = ""

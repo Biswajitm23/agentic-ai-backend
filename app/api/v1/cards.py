@@ -12,6 +12,8 @@ import re
 # Tools whose result a client can render as cards, and the key it arrives under.
 CARD_TOOLS = {
     "search_products": "products",
+    "browse_category": "products",
+    "get_best_sellers": "products",
     "browse_catalogue": "products",
     "recommend_for_me": "products",
     "build_outfit": "outfit",
@@ -22,6 +24,12 @@ CARD_TOOLS = {
     "request_order_change": "choices",
 }
 MAX_CARDS = 12
+
+# Tools whose product list IS the answer, not a shortlist the agent then talks
+# about. A category browse is the shopper's own request drawn back at them, so
+# it is sent whole - trimming it to the few products the reply names would empty
+# a grid the shopper explicitly asked to see.
+WHOLE_RESULT_TOOLS = {"browse_category"}
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -181,6 +189,7 @@ class CardCollector:
 
     def __init__(self) -> None:
         self.products: dict | None = None
+        self.products_whole = False
         self.outfit: dict | None = None
         self.orders: dict | None = None
         self.choices: dict | None = None
@@ -191,6 +200,9 @@ class CardCollector:
         if cards is None:
             return None
         name = CARD_TOOLS[tool_name]
+        if name == "products":
+            # Set per result, so a later ordinary search still gets reconciled.
+            self.products_whole = tool_name in WHOLE_RESULT_TOOLS
         setattr(self, name, cards)
         return name, cards
 
@@ -213,7 +225,7 @@ class CardCollector:
             return
         # Choices are never reconciled against the wording: the whole point is
         # that they do not depend on what the agent chose to say.
-        if self.products is None:
+        if self.products is None or self.products_whole:
             return
         items = self.products.get("items") or []
         kept = keep_mentioned(items, reply)

@@ -103,6 +103,27 @@ async def search_store_handbook(question: str) -> str:
 
 
 @tool
+async def get_best_sellers(limit: int = 5) -> str:
+    """What is actually selling best right now, counted from real orders.
+
+    Use for "what's popular", "best sellers", "what do people buy", "what would
+    you recommend" from a shopper you know nothing else about - not for a named
+    product (search_products) and not for a whole outfit (browse_catalogue).
+
+    limit: how many to return, 1-10; 5 is a good default.
+    Ranked by units sold over the last year, cancelled orders and returned items
+    excluded. Each product carries units_sold and orders alongside the usual
+    price and stock. found=false with reason "no_sales_yet" means nothing has
+    sold yet - say so plainly and offer to show the range instead; never dress a
+    guess up as a best seller.
+    """
+    try:
+        return json.dumps(await shopify_storefront.best_sellers(limit), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("get_best_sellers", exc)
+
+
+@tool
 async def browse_catalogue() -> str:
     """Everything buyable right now, by category - use before build_outfit.
 
@@ -131,6 +152,32 @@ async def build_outfit(items: str | list, budget: float = 0) -> str:
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("build_outfit", exc)
 
+
+
+@tool
+async def browse_category(category: str) -> str:
+    """Every product in ONE category the shopper named or tapped.
+
+    category: what they actually gave you - a name like "Dress" or "Grace
+      Collection", or the id a category tile sent back. Plurals are fine
+      ("dresses"), and both kinds of tile - product types and collections - land
+      on the right products.
+
+    Use this whenever a shopper wants a category rather than one named product:
+    "show me dresses", "what is in Winter Luxe", or a bare category name arriving
+    on its own. Prefer it over search_products for a category - it returns the
+    whole category, in stock, rather than a keyword guess.
+
+    found=false means we have no such category, and it hands back the ones we do
+    have: offer those instead of apologising. more_available=true means there are
+    more than the ones returned.
+    """
+    try:
+        return json.dumps(
+            await shopify_storefront.category_products(category), ensure_ascii=False
+        )
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("browse_category", exc)
 
 
 NOT_SIGNED_IN = {
@@ -264,6 +311,8 @@ async def confirm_order_change(
 
 CUSTOMER_SUPPORT_TOOLS = [
     search_products,
+    browse_category,
+    get_best_sellers,
     browse_catalogue,
     build_outfit,
     check_order_status,
