@@ -54,6 +54,7 @@ query OutfitCatalogue($query: String!, $first: Int!, $variants: Int!) {
       title
       handle
       productType
+      tags
       onlineStoreUrl
       featuredMedia { ... on MediaImage { image { url altText } } }
       options { name values }
@@ -117,6 +118,18 @@ async def _active_products(handles: list[str] | None = None) -> list[dict]:
     return data["products"]["nodes"]
 
 
+# The store tags a piece Boys, Girls or Baby. Without that on the catalogue the
+# agent can only guess from the title, and it guesses badly: asked for a
+# 9-year-old boy it offered the one dress that happened to run to 10Y.
+AUDIENCE_TAGS = ("Boys", "Girls", "Baby")
+
+
+def _suits(tags: list[str] | None) -> list[str]:
+    """Who a piece is for, from the store's own tags. Empty means either."""
+    lowered = {t.strip().lower() for t in tags or []}
+    return [name for name in AUDIENCE_TAGS if name.lower() in lowered]
+
+
 async def browse_catalogue() -> dict:
     """Everything a shopper can buy, grouped by category so a look can be composed."""
     currency = (await shop_info())["currency"]
@@ -131,6 +144,7 @@ async def browse_catalogue() -> dict:
                 "product_id": node.get("legacyResourceId"),
                 "title": node["title"],
                 "category": _category(node["title"], node.get("productType")),
+                "for": _suits(node.get("tags")),
                 "price_from": float(min(prices)) if prices else None,
                 "price_to": float(max(prices)) if prices else None,
                 "in_stock": any(v["availableForSale"] for v in variants),

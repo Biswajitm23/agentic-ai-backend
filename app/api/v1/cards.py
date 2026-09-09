@@ -82,6 +82,22 @@ def keep_mentioned(items: list[dict], reply: str) -> list[dict]:
     return kept
 
 
+_CHOICE_LINE_RE = re.compile(r"^\s*\d+[.)]\s")
+
+
+def _without_choices(reply: str) -> str:
+    """The reply minus the numbered choices the storefront turns into buttons.
+
+    Those lines are the agent's own questions - "everyday, party, school" - and
+    matching products against them drags in whatever happens to share a word with
+    a menu option, like a Party Dress under a question about the occasion.
+    """
+    lines = reply.splitlines()
+    while lines and (not lines[-1].strip() or _CHOICE_LINE_RE.match(lines[-1])):
+        lines.pop()
+    return "\n".join(lines)
+
+
 def _card(item: dict) -> dict:
     """The fields a storefront needs to draw a product and link to it."""
     return {
@@ -228,10 +244,12 @@ class CardCollector:
         if self.products is None or self.products_whole:
             return
         items = self.products.get("items") or []
-        kept = keep_mentioned(items, reply)
-        # Never leave a shopper with nothing to click because the wording drifted.
-        if kept:
-            self.products = {**self.products, "items": kept}
+        kept = keep_mentioned(items, _without_choices(reply))
+        # A reply that names nothing is an apology, a question, or a refusal - and
+        # none of those should be sitting under a grid of products. Keeping the
+        # whole list there was worse than showing none: it put girls' party
+        # dresses under "I have nothing for a 9 year old boy".
+        self.products = {**self.products, "items": kept} if kept else None
 
     def as_dict(self) -> dict:
         """Whatever was collected, for the final payload."""
