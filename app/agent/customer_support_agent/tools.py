@@ -172,6 +172,11 @@ async def browse_category(category: str) -> str:
     found=false means we have no such category, and it hands back the ones we do
     have: offer those instead of apologising. more_available=true means there are
     more than the ones returned.
+
+    also_named_like_this lists products that are not in that category but carry
+    the shopper's word in their own name - "Pyjama Trousers" for "pyjamas". They
+    are already in products; say plainly that they sit under another heading
+    rather than passing them off as part of the category.
     """
     try:
         return json.dumps(

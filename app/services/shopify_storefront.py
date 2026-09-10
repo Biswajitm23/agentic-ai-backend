@@ -1109,6 +1109,55 @@ async def find_category(reference: str) -> dict | None:
     return None
 
 
+# Spellings that differ but mean the same shelf. Shopify's search matches the
+# word as written - "pyjamas" does not find "Pyjama" - so the variants are tried
+# explicitly rather than hoped for.
+_SPELLINGS = [("pyjama", "pajama"), ("grey", "gray"), ("colour", "color")]
+
+
+def search_variants(term: str) -> list[str]:
+    """The forms of a word worth searching titles for.
+
+    Singular as well as plural, because Shopify does not stem: a shopper asking
+    for "pyjamas" would otherwise miss a product called "Pyjama Trousers".
+    """
+    base = " ".join((term or "").split()).lower()
+    if not base:
+        return []
+    forms = {base}
+    for word in list(forms):
+        if word.endswith("s") and len(word) > 3:
+            forms.add(word[:-1])
+    for word in list(forms):
+        for left, right in _SPELLINGS:
+            if left in word:
+                forms.add(word.replace(left, right))
+            if right in word:
+                forms.add(word.replace(right, left))
+    # Singularise the newly spelled forms too.
+    for word in list(forms):
+        if word.endswith("s") and len(word) > 3:
+            forms.add(word[:-1])
+    return [f for f in forms if len(f) >= 3]
+
+
+async def _named_like(term: str, currency: str, limit: int) -> list[dict]:
+    """Products whose own name carries the shopper's word."""
+    variants = search_variants(term)
+    if not variants:
+        return []
+    joined = " OR ".join(f'title:*{v}*' for v in variants)
+    try:
+        data = await graphql(
+            PRODUCT_SEARCH,
+            {"query": f"({joined}) AND status:ACTIVE", "first": limit, "variants": VARIANT_LIMIT},
+        )
+    except (ShopifyError, KeyError, ValueError):
+        logger.warning("Name search failed for %r", term, exc_info=True)
+        return []
+    return [_public_product(node, currency) for node in data["products"]["nodes"]]
+
+
 async def category_products(category: str, limit: int = 12) -> dict:
     """Everything buyable in one category, for a shopper who named or tapped it.
 
@@ -1142,13 +1191,28 @@ async def category_products(category: str, limit: int = 12) -> dict:
         },
     )
     products = [_public_product(node, currency) for node in data["products"]["nodes"]]
+
+    # The shelf is not the only place the word appears. Anything actually called
+    # what they asked for belongs in the answer too, whatever category it is
+    # filed under - Pyjama Trousers are a fair answer to "pyjamas" even though
+    # they live in Trousers.
+    known = {p["product_id"] for p in products}
+    also_named = []
+    for extra in await _named_like(category, currency, limit):
+        if extra["product_id"] not in known:
+            known.add(extra["product_id"])
+            also_named.append(extra)
+
     return {
         "found": True,
         "category": {k: found[k] for k in ("id", "name", "kind", "image", "url", "product_count")},
         "currency": currency,
-        "count": len(products),
+        "count": len(products) + len(also_named),
         "more_available": len(products) == limit,
-        "products": products,
+        # Named-for matches are flagged so the agent can say why they are here:
+        # they are not in the category the shopper's word resolved to.
+        "also_named_like_this": [p["title"] for p in also_named],
+        "products": products + also_named,
     }
 
 
