@@ -12,6 +12,7 @@ projected down to what a shopper may see:
 """
 
 import datetime
+import difflib
 import logging
 import re
 import time
@@ -967,6 +968,85 @@ async def _collection_named(term: str) -> dict | None:
     return None
 
 
+# What a shopper calls it -> the category id the store keeps it under. Only
+# words for things actually stocked: a synonym pointing at a category the shop
+# does not have resolves to nothing, which is the same as not listing it.
+_CATEGORY_SYNONYMS = {
+    "pant": "trousers", "pants": "trousers", "trouser": "trousers",
+    "legging": "trousers", "leggings": "trousers", "bottoms": "trousers",
+    "pyjama": "sleepsuit", "pyjamas": "sleepsuit", "pajama": "sleepsuit",
+    "pajamas": "sleepsuit", "pjs": "sleepsuit", "sleepwear": "sleepsuit",
+    "nightwear": "sleepsuit", "onesie": "sleepsuit", "babygrow": "sleepsuit",
+    "babygro": "sleepsuit", "sleepsuits": "sleepsuit",
+    "sneaker": "shoes", "sneakers": "shoes", "trainer": "shoes",
+    "trainers": "shoes", "plimsoll": "shoes", "plimsolls": "shoes",
+    "pump": "shoes", "pumps": "shoes", "footwear": "shoes",
+    "jumper": "sweater", "jumpers": "sweater", "pullover": "sweater",
+    "knit": "sweater", "knitwear": "sweater", "sweatshirt": "sweater",
+    "wellies": "boots", "wellingtons": "boots", "bootie": "boots",
+    "booties": "boots",
+    "tee": "shirt", "tshirt": "shirt", "top": "shirt", "tops": "shirt",
+    "beanie": "hat", "cap": "hat", "sunhat": "hat", "bonnet": "hat",
+    "hats": "hat",
+    "headband": "hairband", "bow": "hairband", "bows": "hairband",
+    "hairbow": "hairband", "clip": "hairband", "clips": "hairband",
+    "shades": "sunglasses", "sunnies": "sunglasses", "glasses": "sunglasses",
+    "teddy": "toys", "bear": "toys", "softtoy": "toys", "comforter": "toys",
+    "toy": "toys",
+    "blankie": "blanket", "swaddle": "blanket", "throw": "blanket",
+    "playsuit": "romper", "dungarees": "romper", "rompers": "romper",
+    "purse": "bag", "tote": "bag", "bags": "bag",
+    "glove": "mittens", "gloves": "mittens", "mitten": "mittens",
+    "sock": "socks",
+    "pinafore": "dress", "frock": "dress", "gown": "dress",
+}
+
+
+def _synonym_target(term: str, listed: list[dict]) -> dict | None:
+    """The category a shopper's own word points at, if we stock it."""
+    slug = slugify(term)
+    for candidate in [slug, *slug.split("-")]:
+        target = _CATEGORY_SYNONYMS.get(candidate)
+        if not target:
+            continue
+        for entry in listed:
+            if entry["id"] == target:
+                return entry
+    return None
+
+
+# Close enough to be a typo, far enough that "laptops" is not a Blanket. Raising
+# this rejects real slips; lowering it starts inventing categories, which is the
+# worse failure - a shopper told we stock something we do not.
+_TYPO_RATIO = 0.82
+_TYPO_MIN_LENGTH = 4
+
+
+def _typo_target(term: str, listed: list[dict]) -> dict | None:
+    """The category a misspelling was reaching for - "paijamas", "dreses".
+
+    Matched against our own category names and every word a shopper might use
+    for one, so a slip in either vocabulary still lands.
+    """
+    vocabulary: dict[str, str] = {e["id"]: e["id"] for e in listed}
+    vocabulary.update({slugify(e["name"]): e["id"] for e in listed})
+    vocabulary.update({alias: target for alias, target in _CATEGORY_SYNONYMS.items()
+                       if any(e["id"] == target for e in listed)})
+
+    for candidate in [slugify(term), *slugify(term).split("-")]:
+        if len(candidate) < _TYPO_MIN_LENGTH:
+            continue
+        near = difflib.get_close_matches(candidate, vocabulary, n=1, cutoff=_TYPO_RATIO)
+        if not near:
+            continue
+        wanted = vocabulary[near[0]]
+        for entry in listed:
+            if entry["id"] == wanted:
+                logger.info("Read %r as the category %r", term, entry["name"])
+                return entry
+    return None
+
+
 async def find_category(reference: str) -> dict | None:
     """The category a shopper meant, whatever they called it.
 
@@ -986,7 +1066,11 @@ async def find_category(reference: str) -> dict | None:
     # "dresses" should still reach "dress"; two letters would match far too much.
     if len(slug) >= 3:
         for entry in listed:
-            if slug.startswith(entry["id"]) or entry["id"].startswith(slug):
+            if slug.startswith(entry["id"]):
+                return _type_as_category(entry)
+            # Matching the other way needs a longer word to be meant: at three
+            # letters "car" reached Cardigan, and "bel" would reach Belt.
+            if len(slug) >= 4 and entry["id"].startswith(slug):
                 return _type_as_category(entry)
 
     try:
@@ -997,6 +1081,17 @@ async def find_category(reference: str) -> dict | None:
     if named is not None:
         return named
 
+    # The shopper's own word for one of our categories - "pants" for Trousers,
+    # "pyjamas" for a Sleepsuit. Checked before the loose word match below so
+    # the mapping wins over an accidental prefix collision.
+    synonym = _synonym_target(term, listed)
+    if synonym is not None:
+        return _type_as_category(synonym)
+
+    typo = _typo_target(term, listed)
+    if typo is not None:
+        return _type_as_category(typo)
+
     # Last resort: a category word sitting anywhere in the phrase. The prefix
     # rule above only fires when it comes first, so "dresses in white" resolved
     # and "white dresses" did not - the same request, answered two ways. A real
@@ -1005,7 +1100,11 @@ async def find_category(reference: str) -> dict | None:
         if len(word) < 3:
             continue
         for entry in listed:
-            if word == entry["id"] or word.startswith(entry["id"]) or entry["id"].startswith(word):
+            if word == entry["id"] or word.startswith(entry["id"]):
+                return _type_as_category(entry)
+            # The other direction only for a word long enough to mean it: three
+            # letters prefix far too much, and "car" was answering with Cardigan.
+            if len(word) >= 4 and entry["id"].startswith(word):
                 return _type_as_category(entry)
     return None
 
