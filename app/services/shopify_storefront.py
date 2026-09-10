@@ -1011,8 +1011,10 @@ async def category_products(category: str, limit: int = 12) -> dict:
             "found": False,
             "asked_for": category,
             "reason": "no_such_category",
+            # The whole card, not just the name: this list is drawn as tiles, so
+            # dropping the picture and the link left the shopper reading words.
             "categories": [
-                {"id": c["id"], "name": c["name"], "product_count": c["product_count"]}
+                {k: c[k] for k in ("id", "name", "image", "image_alt", "url", "product_count")}
                 for c in listed[:CATEGORY_SUGGESTIONS]
             ],
         }

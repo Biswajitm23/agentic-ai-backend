@@ -208,6 +208,8 @@ class CardCollector:
         self.products_whole = False
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
+        # Offered when the category asked for does not exist; drawn as tiles.
+        self.categories: dict | None = None
         self.outfit: dict | None = None
         self.orders: dict | None = None
         self.choices: dict | None = None
@@ -217,9 +219,13 @@ class CardCollector:
         if tool_name == "browse_category" and output:
             try:
                 found = json.loads(output)
-                self.category = found.get("category") if found.get("found") else None
             except (TypeError, ValueError):
-                self.category = None
+                found = {}
+            self.category = found.get("category") if found.get("found") else None
+            if not found.get("found"):
+                offered = [c for c in (found.get("categories") or []) if c.get("name")]
+                if offered:
+                    self.categories = {"categories": offered[:MAX_CARDS]}
         cards = cards_from(tool_name, output)
         if cards is None:
             return None
@@ -270,4 +276,6 @@ class CardCollector:
             out["orders"] = self.orders
         if self.choices is not None:
             out["choices"] = self.choices
+        if self.categories is not None:
+            out["categories"] = self.categories
         return out
