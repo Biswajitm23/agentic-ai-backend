@@ -335,7 +335,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             yield _sse(name, payload)
 
         try:
-            chips = await suggestions.for_turn(cards.category)
+            chips = await suggestions.for_turn(cards.category, reply=reply)
         except Exception:  # noqa: BLE001 - never fail a reply over a chip row
             logger.warning("Could not build suggestions for session %s", session_id, exc_info=True)
             chips = []

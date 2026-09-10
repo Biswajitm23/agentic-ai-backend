@@ -33,8 +33,19 @@ WHOLE_RESULT_TOOLS = {"browse_category"}
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
-# Words that say nothing about which product this is.
-_NOISE = {"the", "and", "for", "with", "in", "of", "a", "an", "kids", "girls", "boys"}
+# Words that say nothing about which product this is. Held as stems, and matched
+# after stemming, so "boys" and "boy" are both caught - previously only the
+# plural was listed, and the singular in "is it for a boy or a girl?" picked out
+# the Cream Boy's Belt and drew it under a question that named no product.
+#
+# The second group describes the shopper, not the garment. Those words turn up
+# in every clarifying question we ask, so a title carrying one must not be
+# recognised by it: "Leather T Bar Baby Shoes" is still found by "t bar".
+_NOISE = {
+    "the", "and", "for", "with", "in", "of", "a", "an",
+    "kid", "girl", "boy", "child", "children", "baby", "toddler",
+    "year", "old", "size", "colour", "color", "man", "men", "woman", "women",
+}
 # Used only when a title has no word of its own to be recognised by.
 _MENTION_RATIO = 0.5
 
@@ -45,7 +56,8 @@ def _stem(word: str) -> str:
 
 
 def _words(text: str) -> set[str]:
-    return {_stem(w) for w in _WORD_RE.findall(text.lower()) if len(w) > 2 and w not in _NOISE}
+    stems = (_stem(w) for w in _WORD_RE.findall(text.lower()) if len(w) > 2)
+    return {s for s in stems if s not in _NOISE}
 
 
 def keep_mentioned(items: list[dict], reply: str) -> list[dict]:

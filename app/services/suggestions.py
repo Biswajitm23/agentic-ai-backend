@@ -10,6 +10,7 @@ follows, and the catch-all sits last where it costs nothing.
 """
 
 import logging
+import re
 
 from app.services import shopify_storefront
 
@@ -23,6 +24,72 @@ BEST_SELLERS = {"label": "Show best sellers", "prompt": "What are your best sell
 _IRREGULAR = {"dress": "dresses", "blouse": "blouses", "bib": "bibs", "hairband": "hairbands"}
 _ALREADY_PLURAL = {"shoes", "boots", "trousers", "shorts", "sunglasses", "mittens", "socks",
                    "toys", "plants", "essentials", "aminos"}
+
+
+# ── Answering our own question ─────────────────────────────────────────────
+# When the agent asks the shopper something, a row of shelves is the wrong
+# answer: they have just been asked what the occasion is, and "Explore Dresses"
+# does not answer it. These chips reply to the question that was actually put.
+#
+# Each prompt is a sentence the agent already handles in the outfit flow, so a
+# tap moves the conversation on rather than restarting it.
+
+OCCASION_CHIPS = [
+    {"label": "Birthday party", "prompt": "It is for a birthday party", "kind": "occasion"},
+    {"label": "Wedding", "prompt": "It is for a wedding", "kind": "occasion"},
+    {"label": "Christening", "prompt": "It is for a christening", "kind": "occasion"},
+    {"label": "Everyday", "prompt": "Just for everyday wear", "kind": "occasion"},
+]
+
+WHO_CHIPS = [
+    {"label": "For a girl", "prompt": "It is for a girl", "kind": "who"},
+    {"label": "For a boy", "prompt": "It is for a boy", "kind": "who"},
+]
+
+# Asked in priority order: a compound question ("boy or girl, what occasion,
+# which colour?") can only be answered one chip at a time, so the row answers
+# the most useful part and the shopper types or taps the rest.
+_QUESTION_KINDS = [
+    ("occasion", re.compile(r"occasion|what is it for|what's it for|dressing up for", re.I)),
+    ("who", re.compile(r"boy or (?:a )?girl|girl or (?:a )?boy|who is it for|who's it for", re.I)),
+    ("colour", re.compile(r"colou?r", re.I)),
+]
+
+
+def _asks_a_question(reply: str) -> bool:
+    return "?" in reply
+
+
+def question_chips(reply: str, colours: list[str] | None = None) -> list[dict]:
+    """Chips answering whatever the reply asked, or [] if it asked nothing."""
+    if not reply or not _asks_a_question(reply):
+        return []
+    for kind, pattern in _QUESTION_KINDS:
+        if not pattern.search(reply):
+            continue
+        if kind == "occasion":
+            return [dict(c) for c in OCCASION_CHIPS]
+        if kind == "who":
+            return [dict(c) for c in WHO_CHIPS]
+        if colours:
+            return [{"label": c, "prompt": f"In {c.lower()}", "kind": "colour"} for c in colours]
+    return []
+
+
+async def _stocked_colours(limit: int = 4) -> list[str]:
+    """The colours the shop actually has most of, so a chip cannot miss."""
+    from app.services import outfit
+
+    try:
+        catalogue = await outfit.browse_catalogue()
+    except Exception:  # noqa: BLE001 - a chip row is never worth failing a reply for
+        logger.warning("Could not read colours for suggestions", exc_info=True)
+        return []
+    counts: dict[str, int] = {}
+    for product in catalogue.get("products") or []:
+        for colour in product.get("colors") or []:
+            counts[colour] = counts.get(colour, 0) + 1
+    return sorted(counts, key=lambda c: -counts[c])[:limit]
 
 
 def plural(name: str) -> str:
@@ -49,14 +116,24 @@ def _collection_chip(entry: dict) -> dict:
             "kind": "collection", "id": entry.get("handle") or entry.get("id")}
 
 
-async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTIONS) -> list[dict]:
+async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTIONS,
+                   reply: str = "") -> list[dict]:
     """Chips to offer after a reply.
 
-    ``shown_category`` is whatever the shopper is already looking at; it is left
-    out, since offering someone the shelf they are standing in front of is not a
-    suggestion. Everything else is ranked by how much it holds, because a fuller
-    category is a better door into the shop than a thinner one.
+    A reply that asks the shopper something gets chips that answer it - that is
+    what they are for at this point in the conversation.
+
+    Otherwise ``shown_category`` is whatever the shopper is already looking at;
+    it is left out, since offering someone the shelf they are standing in front
+    of is not a suggestion. Everything else is ranked by how much it holds,
+    because a fuller category is a better door into the shop than a thinner one.
     """
+    answering = question_chips(reply)
+    if not answering and reply and _asks_a_question(reply) and re.search(r"colou?r", reply, re.I):
+        answering = question_chips(reply, await _stocked_colours(limit))
+    if answering:
+        return answering[:limit]
+
     seen_id = (shown_category or {}).get("id")
     seen_name = ((shown_category or {}).get("name") or "").strip().lower()
     chips: list[dict] = []
