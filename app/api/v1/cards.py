@@ -82,6 +82,28 @@ def keep_mentioned(items: list[dict], reply: str) -> list[dict]:
     return kept
 
 
+def keep_orders_mentioned(orders: list[dict], reply: str) -> list[dict]:
+    """The orders the reply actually talks about.
+
+    "What was my last order?" is answered about one order, but the tool hands
+    back the last five, and drawing all of them put four the shopper did not ask
+    about under an answer about one.
+
+    An order number is only counted when it is written as one - "#1033", or
+    "order 1033". A bare 1033 is ignored on purpose: replies are full of prices
+    and totals, and "1033.00" should not pull up order 1033.
+    """
+    kept = []
+    for order in orders:
+        bare = (order.get("order_number") or "").lstrip("#").strip()
+        if not bare:
+            continue
+        num = re.escape(bare)
+        if re.search(rf"#\s*{num}\b", reply) or re.search(rf"\border\s+#?{num}\b", reply, re.I):
+            kept.append(order)
+    return kept
+
+
 _CHOICE_LINE_RE = re.compile(r"^\s*\d+[.)]\s")
 
 
@@ -251,10 +273,17 @@ class CardCollector:
         An outfit is exempt: it *is* the answer, priced and totalled, so it is
         sent whole, and the browse that fed it is dropped as noise.
         """
-        # An outfit or an order listing IS the answer, so it is sent whole and any
-        # browse that fed it is dropped as noise.
+        # An outfit or an order listing IS the answer, so any browse that fed it
+        # is dropped as noise.
         if self.outfit is not None or self.orders is not None:
             self.products = None
+        if self.orders is not None:
+            listed = self.orders.get("orders") or []
+            named = keep_orders_mentioned(listed, reply)
+            # Nothing named is "here are your orders" - keep them all. One named
+            # is "your last order was #1033", and the rest are not the answer.
+            if named:
+                self.orders = {**self.orders, "orders": named}
         if self.outfit is not None or self.orders is not None:
             return
         # Choices are never reconciled against the wording: the whole point is
