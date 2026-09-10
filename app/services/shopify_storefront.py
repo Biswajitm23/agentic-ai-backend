@@ -990,10 +990,24 @@ async def find_category(reference: str) -> dict | None:
                 return _type_as_category(entry)
 
     try:
-        return await _collection_named(term)
+        named = await _collection_named(term)
     except (ShopifyError, KeyError, ValueError):
         logger.warning("Collection lookup failed for %r", term, exc_info=True)
-        return None
+        named = None
+    if named is not None:
+        return named
+
+    # Last resort: a category word sitting anywhere in the phrase. The prefix
+    # rule above only fires when it comes first, so "dresses in white" resolved
+    # and "white dresses" did not - the same request, answered two ways. A real
+    # collection has already had its chance, so nothing is stolen from one here.
+    for word in dict.fromkeys(slugify(term).split("-")):
+        if len(word) < 3:
+            continue
+        for entry in listed:
+            if word == entry["id"] or word.startswith(entry["id"]) or entry["id"].startswith(word):
+                return _type_as_category(entry)
+    return None
 
 
 async def category_products(category: str, limit: int = 12) -> dict:

@@ -193,7 +193,11 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
     items = data.get("products") or []
     if not items:
         return None
-    return {"items": [card(i) for i in items[:MAX_CARDS]], "currency": currency}
+    # Every product stays for now. finalise() matches these against the reply and
+    # as_dict() takes the cap: trimming here first meant a catalogue of fifty was
+    # cut to twelve before anyone asked which ones the agent had named, so a
+    # product mentioned from further down the list had no card to attach to.
+    return {"items": [card(i) for i in items], "currency": currency}
 
 
 class CardCollector:
@@ -255,10 +259,24 @@ class CardCollector:
             return
         # Choices are never reconciled against the wording: the whole point is
         # that they do not depend on what the agent chose to say.
-        if self.products is None or self.products_whole:
+        if self.products is None:
             return
         items = self.products.get("items") or []
         kept = keep_mentioned(items, _without_choices(reply))
+
+        if self.products_whole:
+            # A bare category browse names nothing - "here is our Dress category,
+            # 7 styles" - and the grid IS the answer, so it goes whole.
+            #
+            # But the shopper can ask for a slice of that category: "a white
+            # dress for a 7 year old" still browses Dress, and the reply then
+            # picks out the two that qualify. Sending the category anyway put
+            # five dresses that are the wrong colour and the wrong size under an
+            # answer that had already ruled them out. Once the reply names
+            # products, those products are the answer.
+            if kept:
+                self.products = {**self.products, "items": kept}
+            return
         # A reply that names nothing is an apology, a question, or a refusal - and
         # none of those should be sitting under a grid of products. Keeping the
         # whole list there was worse than showing none: it put girls' party
@@ -269,7 +287,9 @@ class CardCollector:
         """Whatever was collected, for the final payload."""
         out: dict = {}
         if self.products is not None:
-            out["products"] = self.products
+            items = self.products.get("items") or []
+            out["products"] = ({**self.products, "items": items[:MAX_CARDS]}
+                               if len(items) > MAX_CARDS else self.products)
         if self.outfit is not None:
             out["outfit"] = self.outfit
         if self.orders is not None:
