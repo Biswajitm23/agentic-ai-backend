@@ -15,6 +15,7 @@ CARD_TOOLS = {
     "browse_category": "products",
     "get_best_sellers": "products",
     "browse_catalogue": "products",
+    "suggest_pieces": "products",
     "recommend_for_me": "products",
     "build_outfit": "outfit",
     "get_my_order_history": "orders",

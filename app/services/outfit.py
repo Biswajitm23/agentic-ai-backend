@@ -165,6 +165,124 @@ async def browse_catalogue() -> dict:
     }
 
 
+# ── Suggesting as the conversation goes ────────────────────────────────────
+# An outfit conversation used to be an interrogation - age, occasion, colour,
+# budget, one reply after another with nothing to look at. Told to show pieces
+# along the way, the model skipped the lookup and invented them ("Boys' Kurta
+# Pyjama, 1,299 INR"). So the filtering lives here, in code: the agent passes
+# what it knows and names what comes back.
+
+# Right for a newborn, the wrong answer to "what should he wear to a party".
+_NURSERY_BASICS = {"Bib", "Blanket", "Sleepsuit", "Mittens", "Socks"}
+
+_WHO = {
+    "boy": "Boys", "boys": "Boys", "son": "Boys", "him": "Boys",
+    "girl": "Girls", "girls": "Girls", "daughter": "Girls", "her": "Girls",
+    "baby": "Baby", "newborn": "Baby", "infant": "Baby",
+}
+
+SUGGESTION_LIMIT = 4
+
+
+def _fits_age(sizes: list[str], age: int | None) -> bool:
+    """Whether a piece comes in a size for this age. Pieces with no size run fit."""
+    if age is None or not sizes:
+        return True
+    for raw in sizes:
+        size = raw.strip().upper()
+        if size == "ONE SIZE" or "UK" in size or "EU" in size:
+            return True                 # shoe sizes do not map to an age
+        if size == f"{age}Y":
+            return True
+        if age <= 1 and size.endswith("M"):
+            return True
+        if size.endswith("Y") and "-" in size:
+            low, _, high = size[:-1].partition("-")
+            if low.isdigit() and high.isdigit() and int(low) <= age <= int(high):
+                return True
+    return False
+
+
+def _colour_match(colours: list[str], wanted: str) -> str | None:
+    """The piece's own name for the colour asked for - "navy" finds "Navy"."""
+    for colour in colours:
+        if wanted in colour.lower():
+            return colour
+    return None
+
+
+async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = "",
+                         age: int | None = None, budget: float | None = None,
+                         limit: int = SUGGESTION_LIMIT) -> dict:
+    """A few in-stock pieces that suit what the shopper has said so far.
+
+    Every filter is optional, so the first message of a conversation already
+    gets something to look at. One piece per category, so the row reads as the
+    start of an outfit rather than four versions of the same shirt.
+    """
+    catalogue = await browse_catalogue()
+    audience = _WHO.get((for_who or "").strip().lower())
+    wanted = (colour or "").strip().lower()
+    age = int(age) if age else None
+
+    pool = [p for p in catalogue["products"] if p["in_stock"]]
+    if audience:
+        pool = [p for p in pool if not p["for"] or audience in p["for"]]
+    if occasion:
+        pool = [p for p in pool if p["category"] not in _NURSERY_BASICS]
+    if age is not None:
+        pool = [p for p in pool if _fits_age(p["sizes"], age)]
+    if budget:
+        pool = [p for p in pool if p["price_from"] is not None and p["price_from"] <= budget]
+
+    colour_matched = None
+    if wanted:
+        coloured = [p for p in pool if _colour_match(p["colors"], wanted)]
+        colour_matched = bool(coloured)
+        # Asked for navy, shown navy - padding the row with other colours would
+        # have the agent calling a powder-blue shirt navy.
+        if coloured:
+            pool = coloured
+
+    # A piece tagged for this child beats one that merely suits either.
+    pool.sort(key=lambda p: 0 if audience and audience in p["for"] else 1)
+
+    picked, seen = [], set()
+    for product in pool:
+        if product["category"] in seen:
+            continue
+        seen.add(product["category"])
+        picked.append(product)
+        if len(picked) >= max(1, limit):
+            break
+
+    still_to_ask = [name for name, have in (("age", age), ("budget", budget)) if not have]
+    return {
+        "currency": catalogue["currency"],
+        "known": {"for": audience, "colour": colour or None, "occasion": occasion or None,
+                  "age": age, "budget": budget or None},
+        "colour_matched": colour_matched,
+        "still_to_ask": still_to_ask,
+        "count": len(picked),
+        "products": [
+            {
+                "handle": p["handle"],
+                "product_id": p["product_id"],
+                "title": p["title"],
+                "category": p["category"],
+                "price_from": p["price_from"],
+                "currency": catalogue["currency"],
+                "colour": _colour_match(p["colors"], wanted) if wanted else None,
+                "colors": p["colors"],
+                "sizes": p["sizes"],
+                "image": p["image"],
+                "url": p["url"],
+            }
+            for p in picked
+        ],
+    }
+
+
 def _affinity(product: dict, categories: set[str], tags: set[str]) -> int:
     """How well a product matches what this shopper has bought before."""
     score = 0
