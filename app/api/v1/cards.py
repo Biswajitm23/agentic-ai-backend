@@ -16,6 +16,7 @@ CARD_TOOLS = {
     "get_best_sellers": "products",
     "browse_catalogue": "products",
     "suggest_pieces": "products",
+    "compare_products": "products",
     "recommend_for_me": "products",
     "build_outfit": "outfit",
     "get_my_order_history": "orders",
@@ -31,6 +32,10 @@ MAX_CARDS = 12
 # it is sent whole - trimming it to the few products the reply names would empty
 # a grid the shopper explicitly asked to see.
 WHOLE_RESULT_TOOLS = {"browse_category"}
+
+# Tools whose products are never trimmed to the wording. A comparison is every
+# product in it, whichever of them the reply happens to name in full.
+FIXED_RESULT_TOOLS = {"compare_products"}
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -225,6 +230,20 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
             "cart_items": data.get("cart_items") or [],
         }
 
+    if tool_name == "compare_products":
+        items = data.get("products") or []
+        if len(items) < 2:
+            return None                     # one product is not a comparison
+        # Ordinary product cards, so they render as they are today, carrying the
+        # spec rows and highlights for a widget that wants to line them up.
+        return {
+            "items": [card(i) | {"specs": i.get("specs") or [], "highlights": i.get("highlights") or []}
+                      for i in items],
+            "currency": currency,
+            "heading": data.get("heading"),
+            "layout": "comparison",
+        }
+
     items = data.get("products") or []
     if not items:
         return None
@@ -250,6 +269,7 @@ class CardCollector:
     def __init__(self) -> None:
         self.products: dict | None = None
         self.products_whole = False
+        self.products_fixed = False
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -277,6 +297,7 @@ class CardCollector:
         if name == "products":
             # Set per result, so a later ordinary search still gets reconciled.
             self.products_whole = tool_name in WHOLE_RESULT_TOOLS
+            self.products_fixed = tool_name in FIXED_RESULT_TOOLS
         setattr(self, name, cards)
         return name, cards
 
@@ -306,7 +327,7 @@ class CardCollector:
             return
         # Choices are never reconciled against the wording: the whole point is
         # that they do not depend on what the agent chose to say.
-        if self.products is None:
+        if self.products is None or self.products_fixed:
             return
         items = self.products.get("items") or []
         kept = keep_mentioned(items, _without_choices(reply))

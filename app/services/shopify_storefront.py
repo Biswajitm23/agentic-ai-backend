@@ -700,6 +700,8 @@ async def collection_tree() -> dict:
       children         broad collection -> its per-type collections, fullest first
       collection_type  per-type collection -> its product type
       cards            handle -> the public collection card
+      ids, titles      lowercased title -> product id, and back to the real title,
+                       for resolving a product a shopper names loosely
     """
     global _tree_cache
     if _fresh(_tree_cache, settings.SUPPORT_WELCOME_CACHE_MINUTES):
@@ -707,6 +709,8 @@ async def collection_tree() -> dict:
 
     published = {c["handle"]: c for c in (await collections(COLLECTION_LIMIT))["collections"]}
     type_of: dict[str, str] = {}
+    ids: dict[str, str] = {}
+    titles: dict[str, str] = {}
     type_products: dict[str, set[str]] = {}
     coll_products: dict[str, set[str]] = {}
     coll_types: dict[str, set[str]] = {}
@@ -721,6 +725,8 @@ async def collection_tree() -> dict:
                 continue
             type_of[pid] = ptype
             type_of[node["title"].strip().lower()] = ptype
+            ids[node["title"].strip().lower()] = pid
+            titles[pid] = node["title"].strip()
             type_products.setdefault(ptype, set()).add(pid)
             for coll in node["collections"]["nodes"]:
                 if coll["handle"] in published:
@@ -755,7 +761,8 @@ async def collection_tree() -> dict:
         handle: sorted((home[t] for t in types if t in home), key=fullest)
         for handle, types in broad.items()
     }
-    tree = {"type_of": type_of, "home": home, "parent": parent, "children": children,
+    tree = {"type_of": type_of, "ids": ids, "titles": titles,
+            "home": home, "parent": parent, "children": children,
             "collection_type": collection_type, "cards": published}
     _tree_cache = (time.monotonic(), tree)
     return tree

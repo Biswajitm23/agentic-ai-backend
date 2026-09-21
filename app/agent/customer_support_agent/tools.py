@@ -16,7 +16,7 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.services import handbook, order_changes, outfit, shopify_storefront, store_profile
+from app.services import compare, handbook, order_changes, outfit, shopify_storefront, store_profile
 from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError
 
@@ -59,6 +59,23 @@ async def check_order_status(order_number: str, email: str) -> str:
         )
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("check_order_status", exc)
+
+
+@tool
+async def compare_products(products: list[str]) -> str:
+    """Put two to four products side by side. Use for "compare X and Y", "X or Y -
+    which is better", "what's the difference between X and Y".
+
+    products: every product they named, as they named it, e.g.
+      ["Catherine gingham dress", "Alice floral dress"].
+    Returns each product with its specs and highlights, plus in_common and
+    differences already worked out - price gaps, sizes, colours, fabric, origin.
+    not_found lists any name that matched nothing, with did_you_mean.
+    """
+    try:
+        return json.dumps(await compare.compare(products), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("compare_products", exc)
 
 
 @tool
@@ -387,6 +404,7 @@ CUSTOMER_SUPPORT_TOOLS = [
     browse_category,
     get_best_sellers,
     suggest_pieces,
+    compare_products,
     browse_catalogue,
     build_outfit,
     check_order_status,
