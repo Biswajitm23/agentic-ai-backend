@@ -79,6 +79,36 @@ _GREETING_WORDS = {
 }
 
 
+# How many they asked for - "2 jackets", "three shirts", "a couple of dresses".
+# Asked for two, the shopper was shown the whole shelf of three: nothing carried
+# the number anywhere. Numbers that are ages, sizes, prices or people ("my 7
+# year old", "size 10", "under 20000", "my 2 kids") are not counts. "One" is
+# left out on purpose - "which one is better" is not a request for one item.
+_COUNT_WORDS = {"two": 2, "three": 3, "four": 4, "five": 5, "six": 6, "seven": 7,
+                "eight": 8, "nine": 9, "ten": 10, "couple": 2}
+_NOT_A_COUNT = (r"(?:years?|yrs?|y|months?|mths?|mos?|m|yo|weeks?|days?|inr|rs|rupees|sizes?|"
+                r"kids?|children|child|boys|girls|sons?|daughters?|babies|twins|people|persons|"
+                r"siblings|grand\w*)\b")
+_COUNT_RE = re.compile(
+    r"(?<!size\s)(?<!sizes\s)(?<!age\s)\b(\d{1,2}|two|three|four|five|six|seven|eight|nine|ten|couple)"
+    rf"\s+(?:of\s+)?(?!{_NOT_A_COUNT})[a-z]",
+    re.I,
+)
+MAX_REQUESTED = 12
+
+
+def _requested_count(message: str) -> int | None:
+    """How many things the shopper asked to see, or None if they named no number.
+
+    "2 shirts and 3 trousers" is five things on screen, so matches add up.
+    """
+    total = 0
+    for match in _COUNT_RE.finditer(message or ""):
+        word = match.group(1).lower()
+        total += int(word) if word.isdigit() else _COUNT_WORDS[word]
+    return total if 0 < total <= MAX_REQUESTED else None
+
+
 def _is_greeting(message: str) -> bool:
     """A hello and nothing else - "hi", "hello there", "good morning"."""
     words = re.findall(r"[a-z]+", (message or "").lower())
@@ -292,6 +322,12 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     if _is_greeting(req.message):
         store = await _store_briefing(req.customer)
         briefing = f"{briefing}\n\n{store}" if briefing else store
+    # Told outright rather than left for the model to count off the message: it
+    # was reading "2 jackets" and still showing the shelf.
+    requested = _requested_count(req.message)
+    if requested:
+        ask = f"[They asked for exactly {requested} item(s): choose and name exactly {requested}, no more]"
+        briefing = f"{briefing}\n\n{ask}" if briefing else ask
     shopper = identity.resolve(req.customer)
 
     async def events() -> AsyncIterator[str]:
@@ -371,6 +407,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # Repeated in `done` so a client that only reads the final event still
         # gets the cards without having to follow the stream.
         cards.finalise(reply)
+        cards.limit_products(requested)
         for name, payload in cards.as_dict().items():
             yield _sse(name, payload)
 

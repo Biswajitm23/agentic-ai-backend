@@ -354,6 +354,16 @@ class CardCollector:
         # dresses under "I have nothing for a 9 year old boy".
         self.products = {**self.products, "items": kept} if kept else None
 
+    def limit_products(self, count: int | None) -> None:
+        """Hold the product row to what the shopper asked for - "2 jackets" is two
+        cards, not the whole shelf. A comparison is left alone: it is exactly the
+        products they named."""
+        if not count or self.products is None or self.products_fixed:
+            return
+        items = self.products.get("items") or []
+        if len(items) > count:
+            self.products = {**self.products, "items": items[:count]}
+
     def shown_products(self) -> list[dict]:
         """Every product this reply put in front of the shopper - the grid and any
         outfit - so the follow-on chips can start from where they are."""
