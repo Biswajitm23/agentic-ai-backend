@@ -16,7 +16,7 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.services import handbook, order_changes, outfit, shopify_storefront
+from app.services import handbook, order_changes, outfit, shopify_storefront, store_profile
 from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError
 
@@ -59,6 +59,20 @@ async def check_order_status(order_number: str, email: str) -> str:
         )
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("check_order_status", exc)
+
+
+@tool
+async def get_store_overview() -> str:
+    """What this shop is: its name, what it sells and its main categories. No arguments.
+
+    Use for questions about the range itself - "how many products do you have",
+    "what do you sell", "what kind of things do you stock". It deliberately
+    carries no product count.
+    """
+    try:
+        return json.dumps(await store_profile.overview(), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("get_store_overview", exc)
 
 
 @tool
@@ -380,6 +394,7 @@ CUSTOMER_SUPPORT_TOOLS = [
     confirm_order_change,
     get_my_order_history,
     recommend_for_me,
+    get_store_overview,
     get_store_info,
     get_store_policies,
     search_store_handbook,

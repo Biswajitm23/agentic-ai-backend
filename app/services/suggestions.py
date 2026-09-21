@@ -174,9 +174,15 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
     if answering:
         return answering[:limit]
 
+    # "Shall I show you our most popular pieces, or a category?" - the first
+    # answer to that is the best-sellers chip, so it leads, and the categories
+    # fill the rest in place of the collection.
+    offers_best = bool(re.search(r"best.?sell|most popular|popular pieces|top (?:selection|pick)s?",
+                                 _questions_in(reply), re.I))
+
     seen_id = (shown_category or {}).get("id")
     seen_name = ((shown_category or {}).get("name") or "").strip().lower()
-    chips: list[dict] = []
+    chips: list[dict] = [dict(BEST_SELLERS)] if offers_best else []
 
     try:
         listed = (await shopify_storefront.categories(CATEGORY_POOL))["categories"]
@@ -185,7 +191,7 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
         listed = []
 
     for entry in listed:
-        if len(chips) >= limit - 1:
+        if len(chips) >= limit - (0 if offers_best else 1):
             break
         if entry.get("id") == seen_id or entry["name"].strip().lower() == seen_name:
             continue
@@ -202,13 +208,13 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
         collections = (await shopify_storefront.collections(6))["collections"]
         for entry in collections:
             handle = entry.get("handle") or entry.get("id")
-            if handle and handle != seen_id and len(chips) < limit:
+            if not offers_best and handle and handle != seen_id and len(chips) < limit:
                 chips.append(_collection_chip(entry))
                 break
     except Exception:  # noqa: BLE001
         logger.warning("Could not build a collection suggestion", exc_info=True)
 
-    if len(chips) < limit:
+    if not offers_best and len(chips) < limit:
         chips.append(dict(BEST_SELLERS))
     return chips[:limit]
 
