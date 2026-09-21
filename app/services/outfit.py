@@ -56,6 +56,7 @@ query OutfitCatalogue($query: String!, $first: Int!, $variants: Int!) {
       productType
       tags
       onlineStoreUrl
+      description(truncateAt: 240)
       featuredMedia { ... on MediaImage { image { url altText } } }
       options { name values }
       variants(first: $variants) {
@@ -302,15 +303,22 @@ async def recommend_from_orders(orders: list[dict], limit: int = 4) -> dict:
     bought_handles: set[str] = set()
     categories: set[str] = set()
     tags: set[str] = set()
+    bought: list[dict] = []
+    category_counts: dict[str, int] = {}
     for order in orders:
         for item in order.get("items") or []:
             if item.get("handle"):
                 bought_handles.add(item["handle"])
             if item.get("category"):
                 categories.add(item["category"].casefold())
-            tags.update(tag.casefold() for tag in item.get("tags") or [])
+                category_counts[item["category"]] = category_counts.get(item["category"], 0) + 1
+            item_tags = {tag.casefold() for tag in item.get("tags") or []} - _HOUSEKEEPING_TAGS
+            tags.update(item_tags)
+            if item.get("title"):
+                bought.append({"title": item["title"], "category": item.get("category") or "",
+                               "tags": item_tags})
     # Housekeeping tags every product carries say nothing about taste.
-    tags -= {"all products", "in-stock", "top products", "best seller"}
+    tags -= _HOUSEKEEPING_TAGS
 
     currency = (await shop_info())["currency"]
     candidates = []
@@ -329,6 +337,7 @@ async def recommend_from_orders(orders: list[dict], limit: int = 4) -> dict:
                 "category": _category(node["title"], node.get("productType")),
                 "tags": node.get("tags") or [],
                 "price_from": float(min(prices)) if prices else None,
+                "about": _first_sentence(node.get("description")),
                 "image": product_image(node),
                 "url": product_url(node),
             }
@@ -337,19 +346,59 @@ async def recommend_from_orders(orders: list[dict], limit: int = 4) -> dict:
     ranked = sorted(candidates, key=lambda p: _affinity(p, categories, tags), reverse=True)
     picks = ranked[:limit]
     for pick in picks:
-        pick["because"] = (
-            "matches what you have bought before"
-            if _affinity(pick, categories, tags)
-            else "popular with other shoppers"
-        )
+        pick["because"], pick["like_purchase"] = _reason(pick, bought)
         pick.pop("tags", None)
+
+    # What they keep coming back for, most often first - the opening line of
+    # the reply ("since you've gone for dresses and cardigans...").
+    interests = sorted(category_counts, key=lambda c: -category_counts[c])
     return {
         "currency": currency,
         "based_on_orders": len(orders),
+        "interests": interests,
+        "heading": _heading(picks),
         "already_owned": sorted(bought_handles),
         "count": len(picks),
         "products": picks,
     }
+
+
+_HOUSEKEEPING_TAGS = {"all products", "in-stock", "top products", "best seller"}
+
+
+def _reason(pick: dict, bought: list[dict]) -> tuple[str, str | None]:
+    """Why this pick, tied to the actual thing they bought - not "matches your
+    history", which gave the agent nothing to say and every card the same line."""
+    category = (pick.get("category") or "").casefold()
+    for item in bought:
+        if category and item["category"].casefold() == category:
+            return f"another {pick['category'].lower()}, like the {item['title']} they bought", item["title"]
+    pick_tags = {t.casefold() for t in pick.get("tags") or []} - _HOUSEKEEPING_TAGS
+    for item in bought:
+        if item["tags"] & pick_tags:
+            return f"in the same style as the {item['title']} they bought", item["title"]
+    return "popular with other shoppers", None
+
+
+def _first_sentence(text: str | None, limit: int = 160) -> str | None:
+    """The product's own opening line, so a reason is quoted rather than invented."""
+    if not text:
+        return None
+    text = " ".join(text.split())
+    end = text.find(". ")
+    first = text[: end + 1] if 0 < end < limit else text[:limit]
+    return first.strip() or None
+
+
+def _heading(picks: list[dict]) -> str | None:
+    """A title for the row of cards: "Picked for you: Dresses, Cardigans and Hairbands"."""
+    from app.services.suggestions import plural
+
+    names = list(dict.fromkeys(plural(p["category"]) for p in picks if p.get("category")))
+    if not names:
+        return None
+    joined = names[0] if len(names) == 1 else f"{', '.join(names[:-1])} and {names[-1]}"
+    return f"Picked for you: {joined}"
 
 
 def _parse_items(raw: str | list | dict) -> list[dict]:

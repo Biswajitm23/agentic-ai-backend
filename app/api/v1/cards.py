@@ -232,7 +232,12 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
     # as_dict() takes the cap: trimming here first meant a catalogue of fifty was
     # cut to twelve before anyone asked which ones the agent had named, so a
     # product mentioned from further down the list had no card to attach to.
-    return {"items": [card(i) for i in items], "currency": currency}
+    result = {"items": [card(i) for i in items], "currency": currency}
+    # A title for the row, when the tool has one - "Picked for you: Dresses and
+    # Cardigans" above a set of recommendations.
+    if data.get("heading"):
+        result["heading"] = data["heading"]
+    return result
 
 
 class CardCollector:

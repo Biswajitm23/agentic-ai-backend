@@ -266,8 +266,11 @@ async def recommend_for_me() -> str:
     """Suggest products for this shopper based on what they have bought before. No arguments.
 
     Use when a signed-in shopper asks what they might like, or for a gift for the
-    same child. Returns products they do not already own, each with why it was
-    picked. signed_in=false carries the same reason codes as get_my_order_history:
+    same child. Returns products they do not already own. interests lists what
+    they buy most, most often first. Each pick carries because (tied to a real
+    past purchase, named in like_purchase) and about (the product's own first
+    line) - the only material for saying why; never add a feature beyond them.
+    signed_in=false carries the same reason codes as get_my_order_history:
     relay its tell_customer rather than writing your own.
     """
     shopper = identity.current()
