@@ -664,6 +664,103 @@ async def collections(limit: int = 8, handles: list[str] | None = None) -> dict:
     return result
 
 
+# ── How the collections nest ───────────────────────────────────────────────
+# Worked out from what each collection holds, so no naming convention has to be
+# kept up in Shopify. A per-type collection (Bibs) holds every product of exactly
+# one type and nothing else; a broad one (Baby Accessories & Gifts) holds every
+# product of several types. Anything else - a curated edit - is neither, and is
+# left out of the tree.
+
+PRODUCT_COLLECTIONS = """
+query SupportProductCollections($cursor: String) {
+  products(first: 30, after: $cursor, query: "status:ACTIVE") {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      legacyResourceId
+      title
+      productType
+      collections(first: 25) { nodes { handle } }
+    }
+  }
+}
+"""
+
+TREE_SCAN_PAGES = 10        # 30 products a page, so up to 300 products
+
+_tree_cache: tuple[float, dict] | None = None
+
+
+async def collection_tree() -> dict:
+    """The published collections as shelves and the broader shelves they sit on.
+
+    Returns:
+      type_of          product id, or lowercased title -> product type
+      home             product type -> the collection holding exactly that type
+      parent           product type -> the narrowest broad collection it sits in
+      children         broad collection -> its per-type collections, fullest first
+      collection_type  per-type collection -> its product type
+      cards            handle -> the public collection card
+    """
+    global _tree_cache
+    if _fresh(_tree_cache, settings.SUPPORT_WELCOME_CACHE_MINUTES):
+        return _tree_cache[1]
+
+    published = {c["handle"]: c for c in (await collections(COLLECTION_LIMIT))["collections"]}
+    type_of: dict[str, str] = {}
+    type_products: dict[str, set[str]] = {}
+    coll_products: dict[str, set[str]] = {}
+    coll_types: dict[str, set[str]] = {}
+
+    cursor: str | None = None
+    for _ in range(TREE_SCAN_PAGES):
+        page = (await graphql(PRODUCT_COLLECTIONS, {"cursor": cursor}))["products"]
+        for node in page["nodes"]:
+            ptype = (node.get("productType") or "").strip()
+            pid = str(node.get("legacyResourceId") or "")
+            if not ptype or not pid:
+                continue
+            type_of[pid] = ptype
+            type_of[node["title"].strip().lower()] = ptype
+            type_products.setdefault(ptype, set()).add(pid)
+            for coll in node["collections"]["nodes"]:
+                if coll["handle"] in published:
+                    coll_products.setdefault(coll["handle"], set()).add(pid)
+                    coll_types.setdefault(coll["handle"], set()).add(ptype)
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        cursor = page["pageInfo"]["endCursor"]
+
+    home: dict[str, str] = {}
+    collection_type: dict[str, str] = {}
+    broad: dict[str, set[str]] = {}
+    for handle, types in coll_types.items():
+        if coll_products[handle] != set().union(*(type_products[t] for t in types)):
+            continue                        # holds part of a type: a curated edit
+        if len(types) == 1:
+            (only,) = types
+            home.setdefault(only, handle)
+            collection_type[handle] = only
+        else:
+            broad[handle] = types
+
+    parent: dict[str, str] = {}
+    for handle, types in sorted(broad.items(), key=lambda kv: len(kv[1])):
+        for t in types:
+            parent.setdefault(t, handle)     # narrowest first, so it wins
+
+    def fullest(h: str) -> tuple:
+        return (-published[h]["product_count"], published[h]["title"])
+
+    children = {
+        handle: sorted((home[t] for t in types if t in home), key=fullest)
+        for handle, types in broad.items()
+    }
+    tree = {"type_of": type_of, "home": home, "parent": parent, "children": children,
+            "collection_type": collection_type, "cards": published}
+    _tree_cache = (time.monotonic(), tree)
+    return tree
+
+
 # ── Best sellers ───────────────────────────────────────────────────────────
 # Shopify's Admin API has no "best selling" sort for products, so the ranking is
 # counted here from what has actually been ordered. It is the most expensive read

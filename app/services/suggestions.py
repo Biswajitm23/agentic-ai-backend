@@ -156,17 +156,82 @@ def _collection_chip(entry: dict) -> dict:
             "kind": "collection", "id": entry.get("handle") or entry.get("id")}
 
 
+# ── Where the shopper is ───────────────────────────────────────────────────
+# The general shelves are the same whatever was just said - ask about Baby
+# Accessories & Gifts and the row still offered Dresses and Shirts. So the row
+# starts from where the shopper is: the shelves of the products this reply
+# showed, then their neighbours under the same broad collection. A bib leads to
+# Bibs, Teddy Bears, Socks, Belts and Sunglasses.
+
+CONTEXT_LIMIT = 5
+
+
+def _explore_chip(card: dict) -> dict:
+    title = card.get("title") or card.get("name") or ""
+    return {"label": f"Explore {title}", "prompt": f"What is in {title}?",
+            "kind": "collection", "id": card.get("handle") or card.get("id")}
+
+
+async def _context_chips(shown_products: list[dict], shown_category: dict | None) -> list[dict]:
+    """Shelves around what the shopper is looking at, nearest first, or []."""
+    tree = await shopify_storefront.collection_tree()
+    handles: list[str] = []
+
+    def add(handle: str | None) -> None:
+        if handle and handle in tree["cards"] and handle not in handles:
+            handles.append(handle)
+
+    def neighbours(product_type: str) -> list[str]:
+        return tree["children"].get(tree["parent"].get(product_type), [])
+
+    def shelf(product_type: str) -> str | None:
+        # Romper has no collection of its own, only Bodysuits & Rompers.
+        return tree["home"].get(product_type) or tree["parent"].get(product_type)
+
+    # 1. The products this reply showed: each one's own shelf, then its neighbours.
+    types: list[str] = []
+    for product in shown_products:
+        found = (tree["type_of"].get(str(product.get("product_id") or ""))
+                 or tree["type_of"].get((product.get("title") or "").strip().lower()))
+        if found and found not in types:
+            types.append(found)
+    for t in types:
+        add(shelf(t))
+    for t in types:
+        for handle in neighbours(t):
+            add(handle)
+
+    # 2. A collection or category the shopper named: what sits under it, or beside it.
+    standing_in = None
+    if shown_category:
+        ident = shown_category.get("id")
+        if shown_category.get("kind") == "collection" and ident:
+            standing_in = ident
+            if ident in tree["children"]:
+                for handle in tree["children"][ident]:
+                    add(handle)
+            elif ident in tree["collection_type"]:
+                for handle in neighbours(tree["collection_type"][ident]):
+                    add(handle)
+        elif shown_category.get("name"):
+            named = shown_category["name"]
+            standing_in = tree["home"].get(named)
+            for handle in neighbours(named):
+                add(handle)
+
+    # The shelf they are already standing on is not a suggestion.
+    return [_explore_chip(tree["cards"][h]) for h in handles if h != standing_in][:CONTEXT_LIMIT]
+
+
 async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTIONS,
-                   reply: str = "") -> list[dict]:
-    """Chips to offer after a reply.
+                   reply: str = "", shown_products: list[dict] | None = None) -> list[dict]:
+    """Chips to offer after a reply, most relevant first.
 
-    A reply that asks the shopper something gets chips that answer it - that is
-    what they are for at this point in the conversation.
-
-    Otherwise ``shown_category`` is whatever the shopper is already looking at;
-    it is left out, since offering someone the shelf they are standing in front
-    of is not a suggestion. Everything else is ranked by how much it holds,
-    because a fuller category is a better door into the shop than a thinner one.
+    1. A reply that asks the shopper something gets chips that answer it.
+    2. Otherwise the shelves around what they are looking at: the collections of
+       the products this reply showed and their neighbours, or what sits under a
+       collection they named. Up to five.
+    3. Failing both, the general shelves.
     """
     answering = question_chips(reply)
     if not answering and reply and _asks_a_question(reply) and re.search(r"colou?r", _questions_in(reply), re.I):
@@ -180,6 +245,28 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
     offers_best = bool(re.search(r"best.?sell|most popular|popular pieces|top (?:selection|pick)s?",
                                  _questions_in(reply), re.I))
 
+    if not offers_best:
+        try:
+            context = await _context_chips(shown_products or [], shown_category)
+        except Exception:  # noqa: BLE001 - chips are a nicety, never a reason to fail a reply
+            logger.warning("Could not build context suggestions", exc_info=True)
+            context = []
+        if len(context) >= limit:
+            return context[:CONTEXT_LIMIT]
+        if context:
+            # One shelf with no neighbours - Dresses - is topped up from the
+            # general shelves rather than left as a single chip.
+            labels = {c["label"] for c in context}
+            filler = await _shelf_chips(shown_category, limit, offers_best=False)
+            return (context + [c for c in filler if c["label"] not in labels])[:limit]
+
+    return await _shelf_chips(shown_category, limit, offers_best)
+
+
+async def _shelf_chips(shown_category: dict | None, limit: int, offers_best: bool) -> list[dict]:
+    """The general shelves - the fullest categories, one collection, best sellers -
+    for when the reply gives nothing to go on. The shelf the shopper is on is left
+    out: offering it back is not a suggestion."""
     seen_id = (shown_category or {}).get("id")
     seen_name = ((shown_category or {}).get("name") or "").strip().lower()
     chips: list[dict] = [dict(BEST_SELLERS)] if offers_best else []

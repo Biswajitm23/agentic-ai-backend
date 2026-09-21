@@ -330,6 +330,12 @@ class CardCollector:
         # dresses under "I have nothing for a 9 year old boy".
         self.products = {**self.products, "items": kept} if kept else None
 
+    def shown_products(self) -> list[dict]:
+        """Every product this reply put in front of the shopper - the grid and any
+        outfit - so the follow-on chips can start from where they are."""
+        return [*((self.products or {}).get("items") or []),
+                *((self.outfit or {}).get("items") or [])]
+
     def as_dict(self) -> dict:
         """Whatever was collected, for the final payload."""
         out: dict = {}
