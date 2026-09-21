@@ -185,63 +185,92 @@ def _facts(node: dict, currency: str) -> dict:
     }
 
 
-def _contrast(products: list[dict], currency: str) -> tuple[list[str], list[str]]:
-    """What they share and where they differ, as plain sentences the agent can use."""
+def _contrast(products: list[dict], currency: str) -> tuple[list[str], list[dict]]:
+    """What they share, as sentences, and where they differ, as rows.
+
+    Each difference row names the attribute and gives every product's value in
+    card order - so a widget can lay the rows out as a table beside the cards -
+    plus a one-line summary the agent can use as it stands. An attribute only
+    becomes a row when the products actually differ on it.
+    """
     every = "Both" if len(products) == 2 else "All"
     common: list[str] = []
-    differ: list[str] = []
+    rows: list[dict] = []
 
     def money(value: float) -> str:
         return f"{value:.2f} {currency}"
 
-    types = {p["category"] for p in products}
-    if len(types) == 1 and None not in types:
-        common.append(f"{every} are {plural(next(iter(types))).lower()}")
-    else:
-        differ.append("Different kinds of piece: " + "; ".join(f"{p['title']} ({p['category']})" for p in products))
+    def row(label: str, values: list[str], summary: str) -> None:
+        rows.append({
+            "label": label,
+            "values": [
+                {"product_id": p["product_id"], "title": p["title"], "value": v}
+                for p, v in zip(products, values)
+            ],
+            "summary": summary,
+        })
 
     by_price = sorted(products, key=lambda p: p["price_from"])
     low, high = by_price[0], by_price[-1]
     if high["price_from"] == low["price_from"]:
         common.append(f"{every} cost {money(low['price_from'])}")
     else:
-        differ.append(
+        row(
+            "Price",
+            [money(p["price_from"]) if p["price_from"] == p["price_to"]
+             else f"{money(p['price_from'])} - {money(p['price_to'])}" for p in products],
             f"{low['title']} is the least expensive at {money(low['price_from'])}, "
             f"{money(high['price_from'] - low['price_from'])} less than {high['title']} "
-            f"at {money(high['price_from'])}"
+            f"at {money(high['price_from'])}",
         )
 
-    ranges = {p["size_range"] for p in products}
-    if len(ranges) == 1 and None not in ranges:
-        common.append(f"{every} come in sizes {next(iter(ranges))}")
+    types = [p["category"] for p in products]
+    if len(set(types)) == 1 and types[0]:
+        common.append(f"{every} are {plural(types[0]).lower()}")
+    else:
+        row("Type", [t or "Not stated" for t in types],
+            "Different kinds of piece: " + "; ".join(f"{p['title']} ({p['category']})" for p in products))
+
+    # No Girls/Boys/Baby tag means the piece suits either.
+    audiences = [" and ".join(p["for"]) or "Any" for p in products]
+    if len(set(audiences)) == 1:
+        if audiences[0] != "Any":
+            common.append(f"{every} are for {audiences[0].lower()}")
+    else:
+        row("For", audiences,
+            "Who for: " + "; ".join(f"{p['title']} {a.lower()}" for p, a in zip(products, audiences)))
+
+    ranges = [p["size_range"] for p in products]
+    if len(set(ranges)) == 1 and ranges[0]:
+        common.append(f"{every} come in sizes {ranges[0]}")
     elif any(ranges):
-        differ.append("Sizes: " + "; ".join(f"{p['title']} {p['size_range'] or 'one size'}" for p in products))
+        row("Sizes", [r or "One size" for r in ranges],
+            "Sizes: " + "; ".join(f"{p['title']} {r or 'one size'}" for p, r in zip(products, ranges)))
 
     palettes = [{c.lower(): c for c in p["colours"]} for p in products]
     if all(palettes):
         shared = set.intersection(*(set(p) for p in palettes))
         if shared:
             common.append(f"{every} come in " + ", ".join(sorted(palettes[0][c] for c in shared)))
+        only = []
         for product, palette in zip(products, palettes):
             others = set().union(*(set(p) for p in palettes if p is not palette))
-            only = [palette[c] for c in palette if c not in others]
-            if only:
-                differ.append(f"Only {product['title']} comes in {', '.join(only)}")
-
-    audiences = {tuple(p["for"]) for p in products}
-    if len(audiences) == 1 and () not in audiences:
-        common.append(f"{every} are for {' and '.join(next(iter(audiences))).lower()}")
-    elif len(audiences) > 1 and () not in audiences:
-        differ.append("Who for: " + "; ".join(f"{p['title']} {'/'.join(p['for'])}" for p in products))
+            unique = [palette[c] for c in palette if c not in others]
+            if unique:
+                only.append(f"Only {product['title']} comes in {', '.join(unique)}")
+        if only:
+            row("Colours", [", ".join(p["colours"]) for p in products], "; ".join(only))
 
     for field, label in (("fabric", "Fabric"), ("made_in", "Made in")):
         values = [p[field] for p in products]
-        if all(values):
-            if len({v.lower() for v in values}) == 1:
-                common.append(f"{label}: {values[0]} for {every.lower()}")
-            else:
-                differ.append(f"{label}: " + "; ".join(f"{p['title']} {p[field]}" for p in products))
-    return common, differ
+        if all(values) and len({v.lower() for v in values}) == 1:
+            common.append(f"{label}: {values[0]} for {every.lower()}")
+        elif any(values):
+            # Known for some and not others is still worth a row, with the gap
+            # said plainly - never filled in with a guess.
+            row(label, [v or "Not stated" for v in values],
+                f"{label}: " + "; ".join(f"{p['title']} {v or 'not stated'}" for p, v in zip(products, values)))
+    return common, rows
 
 
 def _heading(products: list[dict]) -> str:
@@ -279,14 +308,14 @@ async def compare(names: list[str] | str) -> dict:
         )
         products = [_facts(n, currency) for n in data["nodes"] if n and n.get("status") == "ACTIVE"]
 
-    common, differ = _contrast(products, currency) if len(products) >= 2 else ([], [])
+    common, difference = _contrast(products, currency) if len(products) >= 2 else ([], [])
     result = {
         "found": len(products) >= 2,
         "currency": currency,
         "heading": _heading(products),
         "count": len(products),
         "in_common": common,
-        "differences": differ,
+        "difference": difference,
         "not_found": not_found,
         "products": products,
     }

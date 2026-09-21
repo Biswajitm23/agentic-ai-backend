@@ -69,7 +69,8 @@ async def compare_products(products: list[str]) -> str:
     products: every product they named, as they named it, e.g.
       ["Catherine gingham dress", "Alice floral dress"].
     Returns each product with its specs and highlights, plus in_common and
-    differences already worked out - price gaps, sizes, colours, fabric, origin.
+    difference already worked out: one row per attribute that differs - price,
+    type, who for, sizes, colours, fabric, made in - each with a summary.
     not_found lists any name that matched nothing, with did_you_mean.
     """
     try:

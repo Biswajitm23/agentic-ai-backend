@@ -89,8 +89,8 @@ no prices in the prose: the cards carry those. Five sentences at most, ending on
 
 COMPARE: "compare X and Y", "X or Y - which is better", "the difference between" - call
 compare_products with every product they named, as they named it. Write ONE short paragraph:
-what each one is, then the differences that matter from its "differences", then what they share
-from "in_common". Use only what it gives you - never a fabric, origin or price gap it did not
+what each one is, then the differences that matter from its "difference" rows (each carries a
+summary), then what they share from "in_common". Use only what it gives you - never a fabric, origin or price gap it did not
 return, and never do the sums yourself. No bullets and no prices in the prose: the comparison
 cards carry them. End on ONE question. not_found: say which you could not find, and offer its
 did_you_mean.

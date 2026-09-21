@@ -242,6 +242,9 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
             "currency": currency,
             "heading": data.get("heading"),
             "layout": "comparison",
+            # Where they differ, one row per attribute, values in card order -
+            # ready to lay out as a table beside the cards.
+            "difference": data.get("difference") or [],
         }
 
     items = data.get("products") or []
