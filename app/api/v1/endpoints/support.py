@@ -9,6 +9,7 @@ admin agent and read internal business data.
 
 import json
 import logging
+import re
 import uuid
 from collections.abc import AsyncIterator
 
@@ -65,6 +66,68 @@ class SupportChatRequest(BaseModel):
     context: PageContext | None = None
 
 
+# ── Saying hello ───────────────────────────────────────────────────────────
+# The agent is told nothing about the shop it works for, so a "hi" came back as
+# "Hi Subham, what can I help you find?" - no name, no idea what we sell. A bare
+# hello now carries a short store briefing for that one turn; every other turn
+# stays as lean as before, since this block would otherwise ride along always.
+
+_GREETING_WORDS = {
+    "hi", "hii", "hiii", "hello", "helo", "hey", "heya", "hiya", "howdy", "yo",
+    "namaste", "hola", "greetings", "good", "morning", "afternoon", "evening",
+    "there", "all", "team", "everyone", "folks", "sup",
+}
+GREETING_CATEGORIES = 8     # read this many, then drop "Dress"/"Dresses" twins
+
+
+def _is_greeting(message: str) -> bool:
+    """A hello and nothing else - "hi", "hello there", "good morning"."""
+    words = re.findall(r"[a-z]+", (message or "").lower())
+    return 0 < len(words) <= 4 and all(w in _GREETING_WORDS for w in words)
+
+
+def _singular(name: str) -> str:
+    key = name.strip().lower()
+    if key.endswith("es") and key[:-2].endswith("ss"):
+        return key[:-2]
+    if key.endswith("s") and not key.endswith("ss"):
+        return key[:-1]
+    return key
+
+
+async def _store_name() -> str:
+    """What the shop is called: the configured brand, else Shopify's own name."""
+    configured = settings.SUPPORT_STORE_NAME.strip()
+    if configured:
+        return configured
+    return (await shopify_storefront.shop_info())["name"]
+
+
+async def _store_briefing(customer: Customer | None) -> str:
+    """Who we are, for a hello. Every part is optional: a slow lookup must not
+    cost the shopper their greeting."""
+    lines = ["[Store - use this to greet them]"]
+    try:
+        lines.append(f"Name: {await _store_name()}")
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read the store name for a greeting", exc_info=True)
+    lines.append(f"What we sell (say it in your own words): {settings.SUPPORT_STORE_DESCRIPTION}")
+    try:
+        listed = (await shopify_storefront.categories(GREETING_CATEGORIES))["categories"]
+        names: dict[str, str] = {}
+        for entry in listed:
+            names.setdefault(_singular(entry["name"]), suggestions.plural(entry["name"]))
+        if names:
+            # Four, and already plural: handed six raw product types, the agent
+            # read every one out - "Dress, Hat, Shirt" - like a stock list.
+            lines.append("Our main categories: " + ", ".join(list(names.values())[:4]))
+    except Exception:  # noqa: BLE001
+        logger.warning("Could not read categories for a greeting", exc_info=True)
+    signed_in = bool(customer and customer.logged_in)
+    lines.append("Signed in: yes - welcome them back" if signed_in else "Signed in: no")
+    return "\n".join(lines)
+
+
 def _welcome_handles() -> list[str]:
     """The collections the merchant pinned to the welcome screen, in their order."""
     return [h.strip() for h in settings.SUPPORT_WELCOME_COLLECTIONS.split(",") if h.strip()]
@@ -76,7 +139,7 @@ async def _welcome_text() -> str:
     if configured:
         return configured
     try:
-        name = (await shopify_storefront.shop_info())["name"]
+        name = await _store_name()
     except Exception:  # noqa: BLE001 - a greeting must not fail on a slow shop lookup
         logger.warning("Could not read the shop name for the greeting", exc_info=True)
         name = "our store"
@@ -252,6 +315,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     history = [] if not req.message.strip() else await _load_history(session_id, req.message)
     # The briefing rides along with this turn only; history keeps the raw message.
     briefing = describe(req.cart, req.customer, req.context)
+    if _is_greeting(req.message):
+        store = await _store_briefing(req.customer)
+        briefing = f"{briefing}\n\n{store}" if briefing else store
     shopper = identity.resolve(req.customer)
 
     async def events() -> AsyncIterator[str]:

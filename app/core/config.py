@@ -84,6 +84,10 @@ class Settings(BaseSettings):
     SUPPORT_WELCOME_COLLECTIONS: str = ""
     SUPPORT_WELCOME_COLLECTION_LIMIT: int = 8
     SUPPORT_WELCOME_CACHE_MINUTES: int = 30
+    # How the agent introduces the shop when someone says hello. Blank name means
+    # Shopify's own shop name; set it when the widget shows a different brand.
+    SUPPORT_STORE_NAME: str = ""
+    SUPPORT_STORE_DESCRIPTION: str = "clothes, shoes and accessories for babies and young children"
 
     # Categories are grouped from the live catalogue, which barely moves.
     SUPPORT_CATEGORY_CACHE_MINUTES: int = 30

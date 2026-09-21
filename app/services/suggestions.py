@@ -68,7 +68,7 @@ BUDGET_CHIPS = [
 # the most useful part and the shopper types or taps the rest.
 _QUESTION_KINDS = [
     ("occasion", re.compile(r"occasion|what is it for|what's it for|dressing up for", re.I)),
-    ("who", re.compile(r"boy or (?:a )?girl|girl or (?:a )?boy|who is it for|who's it for", re.I)),
+    ("who", re.compile(r"boy or (?:a )?girl|girl or (?:a )?boy|who is it for|who's it for|who are you shopping for", re.I)),
     ("age", re.compile(r"how old|what age|\bage\b", re.I)),
     ("budget", re.compile(r"budget|how much (?:would|do|can) you|spend", re.I)),
     ("colour", re.compile(r"colou?r", re.I)),
@@ -136,8 +136,11 @@ def plural(name: str) -> str:
         return name
     if lowered in _IRREGULAR:
         return _IRREGULAR[lowered].title()
-    if lowered.endswith(("s", "x", "ch", "sh")):
+    if lowered.endswith(("ss", "x", "ch", "sh")):
         return f"{name}es"
+    # Already plural - "Dresses", "T-Shirts". Adding to it gave "Explore Dresseses".
+    if lowered.endswith("s"):
+        return name
     return f"{name}s"
 
 
@@ -186,7 +189,12 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
             break
         if entry.get("id") == seen_id or entry["name"].strip().lower() == seen_name:
             continue
-        chips.append(_category_chip(entry))
+        chip = _category_chip(entry)
+        # "Dress" and "Dresses" are separate product types in the store but the
+        # same shelf to a shopper - one "Explore Dresses" is enough.
+        if any(c["label"] == chip["label"] for c in chips):
+            continue
+        chips.append(chip)
 
     # One collection alongside the plain categories: it is the merchandised door,
     # and it reads differently enough that the row does not look like one list.
