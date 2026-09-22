@@ -49,11 +49,37 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 # recognised by it: "Leather T Bar Baby Shoes" is still found by "t bar".
 _NOISE = {
     "the", "and", "for", "with", "in", "of", "a", "an",
+    # Plain English that a title happens to hold: "made for little ones" drew
+    # the Cashmere All In One under a reply that named no product at all.
+    "one", "all", "two", "set", "pair", "new",
     "kid", "girl", "boy", "child", "children", "baby", "toddler",
     "year", "old", "size", "colour", "color", "man", "men", "woman", "women",
 }
 # Used only when a title has no word of its own to be recognised by.
 _MENTION_RATIO = 0.5
+# Kinds of piece, as stems. Over a whole shelf they describe it - "from shirts
+# and jumpers to trousers" - rather than pick a product out, even when only one
+# title there carries the word: read as names, they cut nineteen boys' pieces
+# down to the four that happened to say "jacket", "trousers" or "booties".
+_KINDS = {
+    "dress", "shirt", "top", "blouse", "jumper", "sweater", "cardigan", "knitwear",
+    "jacket", "coat", "trouser", "short", "skirt", "legging", "romper", "bodysuit",
+    "sleepsuit", "pyjama", "nightwear", "shoe", "boot", "bootie", "sandal", "plimsoll",
+    "hat", "bonnet", "cap", "hairband", "headband", "bow", "belt", "sock", "bib",
+    "blanket", "sunglasse", "toy", "teddy", "bear", "accessorie", "gift", "piece",
+}
+
+
+def _money_forms(total) -> list[str]:
+    """How a reply may write a total: "36300.00", "36,300.00", "36300"."""
+    try:
+        value = float(total)
+    except (TypeError, ValueError):
+        return []
+    forms = [f"{value:.2f}", f"{value:,.2f}"]
+    if value == int(value):
+        forms += [f"{int(value):,}", str(int(value))]
+    return forms
 
 
 def _stem(word: str) -> str:
@@ -66,7 +92,7 @@ def _words(text: str) -> set[str]:
     return {s for s in stems if s not in _NOISE}
 
 
-def keep_mentioned(items: list[dict], reply: str) -> list[dict]:
+def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None) -> list[dict]:
     """The products the reply actually talks about.
 
     Prose shortens titles - "Catherine Gingham Embroidered Sleeveless Trapeze
@@ -77,8 +103,10 @@ def keep_mentioned(items: list[dict], reply: str) -> list[dict]:
     Matching on any shared word would be wrong in the other direction: with
     "Leather T Bar Baby Shoes" in the reply, "leather" and "shoes" must not drag
     the Mary Janes in beside it.
+
+    ignore: stems in the reply that must not count as naming anything.
     """
-    said = _words(reply)
+    said = _words(reply) - (ignore or set())
     title_words = [(item, _words(item.get("title") or "")) for item in items]
 
     frequency: dict[str, int] = {}
@@ -284,6 +312,10 @@ class CardCollector:
         # Offered when the category asked for does not exist; drawn as tiles.
         self.categories: dict | None = None
         self.outfit: dict | None = None
+        # Every look priced this turn. The agent often builds two - the swap and
+        # the in-budget fallback - and the last one built is not always the one
+        # the reply presents.
+        self.outfits: list[dict] = []
         self.orders: dict | None = None
         self.choices: dict | None = None
 
@@ -319,8 +351,50 @@ class CardCollector:
             # Set per result, so a later ordinary search still gets reconciled.
             self.products_whole = tool_name in WHOLE_RESULT_TOOLS
             self.products_fixed = tool_name in FIXED_RESULT_TOOLS
+        if name == "outfit":
+            self.outfits.append(cards)
         setattr(self, name, cards)
         return name, cards
+
+    def _presented_outfit(self, reply: str) -> None:
+        """Send the look the reply presents, and what else it offered beside it.
+
+        "Here's the look with Chelsea boots ... or the Plimsolls keep it in
+        budget" is two builds, and the widget drew the Plimsolls look - the last
+        one priced - under a reply about boots. The reply quotes the total of the
+        look it presents first, so that one leads; failing a total, the one it
+        names most of, the latest on a tie.
+        """
+        chosen = self.outfit
+        if len(self.outfits) > 1:
+            def placed(look: dict) -> int:
+                spots = [reply.find(t) for t in _money_forms(look.get("total")) if t in reply]
+                return min(spots) if spots else len(reply) + 1
+
+            everyone = [i for look in self.outfits for i in look.get("items") or []]
+            named = {id(i) for i in keep_mentioned(everyone, reply)}
+            chosen = min(
+                reversed(self.outfits),
+                key=lambda look: (placed(look), -sum(id(i) in named for i in look.get("items") or [])),
+            )
+        if chosen is None:
+            return
+        # Pieces offered as the other choice: from a look not sent, or picked out
+        # of the catalogue the agent browsed to find them.
+        inside = {i.get("product_id") for i in chosen.get("items") or []}
+        pool, pooled = [], set()
+        for item in [*(i for look in self.outfits if look is not chosen for i in look.get("items") or []),
+                     *((self.products or {}).get("items") or [])]:
+            # Once each: a piece twice over has no word of its own to be found by.
+            if item.get("product_id") not in pooled:
+                pooled.add(item.get("product_id"))
+                pool.append(item)
+        alternatives, seen = [], set(inside)
+        for item in keep_mentioned(pool, reply, ignore=_KINDS):
+            if item.get("product_id") not in seen:
+                seen.add(item.get("product_id"))
+                alternatives.append(item)
+        self.outfit = {**chosen, "alternatives": alternatives[:MAX_CARDS]} if alternatives else chosen
 
     def finalise(self, reply: str) -> None:
         """Reconcile the cards with the answer the shopper actually reads.
@@ -334,7 +408,10 @@ class CardCollector:
         sent whole, and the browse that fed it is dropped as noise.
         """
         # An outfit or an order listing IS the answer, so any browse that fed it
-        # is dropped as noise.
+        # is dropped as noise - once it has given up any alternative the reply
+        # offered from it.
+        if self.outfit is not None:
+            self._presented_outfit(reply)
         if self.outfit is not None or self.orders is not None:
             self.products = None
         if self.orders is not None:
@@ -351,7 +428,8 @@ class CardCollector:
         if self.products is None or self.products_fixed:
             return
         items = self.products.get("items") or []
-        kept = keep_mentioned(items, _without_choices(reply))
+        kept = keep_mentioned(items, _without_choices(reply),
+                              ignore=_KINDS if self.products_whole else None)
 
         if self.products_whole:
             # A bare category browse names nothing - "here is our Dress category,

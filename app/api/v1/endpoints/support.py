@@ -310,7 +310,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  price, image and url
       outfit  - {items[], currency, total,        a complete look: the same cards plus
                  budget, within_budget,           the exact total and the variants to
-                 cart_items[]}                    add to the bag
+                 cart_items[], alternatives?[]}   add to the bag; alternatives are the
+                                                 other pieces the reply offered in
+                                                 their place ("or the Plimsolls")
       actions - {"action", items?, page?,        what to do with their bag, once per
                  url?, absolute_url?}            turn at most. action is "add previous
                                                  products in cart", "checkout" (with

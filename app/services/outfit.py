@@ -25,7 +25,8 @@ from app.services.shopify_storefront import (
 
 logger = logging.getLogger(__name__)
 
-MAX_PRODUCTS = 50
+MAX_PRODUCTS = 50          # per page
+CATALOGUE_PAGES = 10       # ...so up to 500 products
 MAX_VARIANTS = 100
 MAX_OUTFIT_ITEMS = 8
 
@@ -47,8 +48,9 @@ CATEGORY_RULES: list[tuple[str, tuple[str, ...]]] = [
 ]
 
 CATALOGUE = """
-query OutfitCatalogue($query: String!, $first: Int!, $variants: Int!) {
-  products(first: $first, query: $query, sortKey: TITLE) {
+query OutfitCatalogue($query: String!, $first: Int!, $variants: Int!, $after: String) {
+  products(first: $first, query: $query, sortKey: TITLE, after: $after) {
+    pageInfo { hasNextPage endCursor }
     nodes {
       legacyResourceId
       title
@@ -115,8 +117,21 @@ async def _active_products(handles: list[str] | None = None) -> list[dict]:
     if handles:
         joined = " OR ".join(f"handle:{h}" for h in handles)
         query = f"({joined}) AND status:ACTIVE"
-    data = await graphql(CATALOGUE, {"query": query, "first": MAX_PRODUCTS, "variants": MAX_VARIANTS})
-    return data["products"]["nodes"]
+    # Page by page: one page of 50 stopped at the letter L, so half the shop -
+    # every girls' blouse and most of the dresses - never reached a suggestion.
+    nodes: list[dict] = []
+    after = None
+    for _ in range(CATALOGUE_PAGES):
+        data = await graphql(
+            CATALOGUE,
+            {"query": query, "first": MAX_PRODUCTS, "variants": MAX_VARIANTS, "after": after},
+        )
+        page = data["products"]
+        nodes.extend(page["nodes"])
+        if not page["pageInfo"]["hasNextPage"]:
+            break
+        after = page["pageInfo"]["endCursor"]
+    return nodes
 
 
 # The store tags a piece Boys, Girls or Baby. Without that on the catalogue the

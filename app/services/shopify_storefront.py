@@ -47,6 +47,7 @@ query SupportProductSearch($query: String!, $first: Int!, $variants: Int!) {
       title
       handle
       productType
+      tags
       onlineStoreUrl
       totalInventory
       featuredMedia { ... on MediaImage { image { url altText } } }
@@ -343,6 +344,17 @@ def _public_variant(v: dict, node: dict) -> dict:
     }
 
 
+# The store tags each piece Girls, Boys or Baby rather than keeping a collection
+# for each. No tag means the piece suits either.
+AUDIENCE_TAGS = ("Girls", "Boys", "Baby")
+
+
+def suits(tags: list[str] | None) -> list[str]:
+    """Who a piece is for, from its tags: ["Girls", "Baby"], or [] for anyone."""
+    lowered = {t.strip().lower() for t in tags or []}
+    return [name for name in AUDIENCE_TAGS if name.lower() in lowered]
+
+
 def _public_product(node: dict, currency: str) -> dict:
     variants = node["variants"]["nodes"]
     prices = [float(v["price"]) for v in variants if v.get("price") is not None]
@@ -350,6 +362,7 @@ def _public_product(node: dict, currency: str) -> dict:
         "product_id": node.get("legacyResourceId"),
         "title": node["title"],
         "category": node.get("productType") or None,
+        "for": suits(node.get("tags")),
         "url": product_url(node),
         "image": product_image(node),
         "currency": currency,
@@ -993,6 +1006,7 @@ query SupportCategoryProductList($query: String!, $first: Int!, $variants: Int!)
       title
       handle
       productType
+      tags
       onlineStoreUrl
       totalInventory
       featuredMedia { ... on MediaImage { image { url altText } } }
@@ -1154,6 +1168,32 @@ def _typo_target(term: str, listed: list[dict]) -> dict | None:
     return None
 
 
+def _title_stems(text: str) -> set[str]:
+    stems = set()
+    for word in re.findall(r"[a-z0-9]+", text.lower()):
+        if len(word) < 3 or word in ("and", "the", "for"):
+            continue
+        if word.endswith("sses"):
+            word = word[:-2]
+        elif word.endswith("s") and not word.endswith("ss") and len(word) > 3:
+            word = word[:-1]
+        stems.add(word)
+    return stems
+
+
+async def _collection_holding(term: str) -> dict | None:
+    """The published collection whose title holds every word of the term, tightest first."""
+    wanted = _title_stems(term)
+    if not wanted:
+        return None
+    listed = (await collections(COLLECTION_LIMIT))["collections"]
+    holding = [c for c in listed if wanted <= _title_stems(c["title"])]
+    if not holding:
+        return None
+    best = min(holding, key=lambda c: len(_title_stems(c["title"]) - wanted))
+    return await _collection_named(best["handle"])
+
+
 async def find_category(reference: str) -> dict | None:
     """The category a shopper meant, whatever they called it.
 
@@ -1187,6 +1227,16 @@ async def find_category(reference: str) -> dict | None:
         named = None
     if named is not None:
         return named
+
+    # A collection named by only some of its words: "baby accessories" is Baby
+    # Accessories & Gifts. Shopify's title search wants the whole title.
+    try:
+        partial = await _collection_holding(term)
+    except (ShopifyError, KeyError, ValueError):
+        logger.warning("Collection title match failed for %r", term, exc_info=True)
+        partial = None
+    if partial is not None:
+        return partial
 
     # The shopper's own word for one of our categories - "pants" for Trousers,
     # "pyjamas" for a Sleepsuit. Checked before the loose word match below so
@@ -1265,15 +1315,126 @@ async def _named_like(term: str, currency: str, limit: int) -> list[dict]:
     return [_public_product(node, currency) for node in data["products"]["nodes"]]
 
 
+# "Girls", "for my son", "baby clothes" name a shelf too, just not a collection:
+# the store marks who a piece is for with a tag. Told "we don't have a girls
+# category" while thirty pieces carried the tag, the shopper saw none of them.
+_AUDIENCE_WORDS = {
+    "girl": "Girls", "girls": "Girls", "daughter": "Girls", "daughters": "Girls",
+    "granddaughter": "Girls", "niece": "Girls",
+    "boy": "Boys", "boys": "Boys", "son": "Boys", "sons": "Boys",
+    "grandson": "Boys", "nephew": "Boys",
+    "baby": "Baby", "babies": "Baby", "newborn": "Baby", "newborns": "Baby",
+    "infant": "Baby", "infants": "Baby",
+}
+# Words that come with an audience without narrowing it: "products specifically
+# for my girls" is the Girls shelf and nothing smaller.
+_AUDIENCE_FILLER = {
+    "for", "my", "our", "your", "a", "an", "the", "s", "all", "any", "some", "only", "just",
+    "specifically", "especially", "products", "product", "clothes", "clothing", "items",
+    "item", "things", "stuff", "something", "anything", "pieces", "piece", "kids", "kid",
+    "children", "child", "little", "wear", "outfits", "outfit", "garments", "range",
+    "section", "collection", "category", "ones", "options", "styles",
+}
+AUDIENCE_SHELF_SCAN = 100      # pieces read for one audience before mixing them
+
+
+def _audience_of(term: str) -> tuple[str | None, str]:
+    """("Girls", "dresses") from "girls dresses"; (None, term) when no one is named."""
+    words = slugify(term).split("-")
+    audience = next((_AUDIENCE_WORDS[w] for w in words if w in _AUDIENCE_WORDS), None)
+    if audience is None:
+        return None, term
+    rest = [w for w in words if w and w not in _AUDIENCE_WORDS and w not in _AUDIENCE_FILLER]
+    return audience, " ".join(rest)
+
+
+def _suits_audience(pieces_for: list[str], audience: str) -> bool:
+    """Whether a piece belongs on this audience's shelf of a category.
+
+    Girls' dresses keep the pieces that suit either and lose only the ones cut
+    for boys - and the reverse. Baby keeps what is tagged Baby or for anyone.
+    """
+    if audience == "Baby":
+        return not pieces_for or "Baby" in pieces_for
+    other = "Boys" if audience == "Girls" else "Girls"
+    return audience in pieces_for or other not in pieces_for
+
+
+def _mixed(products: list[dict]) -> list[dict]:
+    """One of each kind in turn - a dress, a hat, a coat - rather than A to Z."""
+    by_kind: dict[str, list[dict]] = {}
+    for product in products:
+        by_kind.setdefault(product.get("category") or "", []).append(product)
+    queues = list(by_kind.values())
+    out: list[dict] = []
+    while any(queues):
+        for queue in queues:
+            if queue:
+                out.append(queue.pop(0))
+    return out
+
+
+async def _audience_shelf(audience: str, asked: str, limit: int) -> dict | None:
+    """Every piece tagged for one audience, or None when nothing is."""
+    currency = (await shop_info())["currency"]
+    data = await graphql(
+        CATEGORY_PRODUCT_LIST,
+        {"query": f'tag:"{audience}" AND status:ACTIVE', "first": AUDIENCE_SHELF_SCAN,
+         "variants": VARIANT_LIMIT},
+    )
+    everything = [_public_product(node, currency) for node in data["products"]["nodes"]]
+    if not everything:
+        return None
+    products = _mixed(everything)[:limit]
+    return {
+        "found": True,
+        "asked_for": asked,
+        "category": {
+            "id": audience.lower(),
+            "name": audience,
+            "kind": "audience",
+            "image": products[0]["image"],
+            # Shopify's own tag filter on the full catalogue.
+            "url": f"https://{store_domain()}/collections/all/{audience.lower()}",
+            "product_count": len(everything),
+        },
+        "currency": currency,
+        # How many we have, not how many came back: "12" for thirty girls' pieces
+        # undersold the shelf.
+        "count": len(everything),
+        "showing": len(products),
+        "more_available": len(everything) > len(products),
+        "also_named_like_this": [],
+        "products": products,
+    }
+
+
 async def category_products(category: str, limit: int = 12) -> dict:
     """Everything buyable in one category, for a shopper who named or tapped it.
 
     Only ACTIVE products, like every other read here. found=false carries the
     categories that do exist, so a caller can offer real ones rather than
-    apologising into a void.
+    apologising into a void. A shopper named on its own - "girls", "for my son" -
+    is their tagged shelf; with a category - "girls dresses" - it narrows that.
     """
     limit = max(1, min(limit, CATEGORY_PRODUCT_LIMIT))
+    audience, rest = _audience_of(category)
+    if audience and not rest:
+        shelf = await _audience_shelf(audience, category, limit)
+        if shelf is not None:
+            return shelf
     found = await find_category(category)
+    if found is None and audience and rest:
+        found = await find_category(rest)
+        if found is None:
+            # "girls party wear", "baby accessories": their own shelf beats a
+            # list of categories that are not what they asked for.
+            shelf = await _audience_shelf(audience, category, limit)
+            if shelf is not None:
+                return shelf
+    # "Baby Accessories & Gifts" already says who it is for.
+    if audience and found is not None and audience.lower() in found["name"].lower():
+        audience = None
     if found is None:
         listed = await _grouped_categories()
         return {
@@ -1293,11 +1454,17 @@ async def category_products(category: str, limit: int = 12) -> dict:
         CATEGORY_PRODUCT_LIST,
         {
             "query": f'{found["filter"]} AND status:ACTIVE',
-            "first": limit,
+            # Room to lose the pieces cut for someone else and still fill the grid.
+            "first": CATEGORY_PRODUCT_LIMIT if audience else limit,
             "variants": VARIANT_LIMIT,
         },
     )
     products = [_public_product(node, currency) for node in data["products"]["nodes"]]
+    if audience:
+        products = [p for p in products if _suits_audience(p["for"], audience)]
+    more_available = len(products) > limit or len(data["products"]["nodes"]) == (
+        CATEGORY_PRODUCT_LIMIT if audience else limit)
+    products = products[:limit]
 
     # The shelf is not the only place the word appears. Anything actually called
     # what they asked for belongs in the answer too, whatever category it is
@@ -1305,22 +1472,26 @@ async def category_products(category: str, limit: int = 12) -> dict:
     # they live in Trousers.
     known = {p["product_id"] for p in products}
     also_named = []
-    for extra in await _named_like(category, currency, limit):
-        if extra["product_id"] not in known:
+    for extra in await _named_like(rest if audience else category, currency, limit):
+        if extra["product_id"] not in known and (not audience or _suits_audience(extra["for"], audience)):
             known.add(extra["product_id"])
             also_named.append(extra)
 
-    return {
+    result = {
         "found": True,
         "category": {k: found[k] for k in ("id", "name", "kind", "image", "url", "product_count")},
         "currency": currency,
         "count": len(products) + len(also_named),
-        "more_available": len(products) == limit,
+        "more_available": more_available,
         # Named-for matches are flagged so the agent can say why they are here:
         # they are not in the category the shopper's word resolved to.
         "also_named_like_this": [p["title"] for p in also_named],
         "products": products + also_named,
     }
+    if audience:
+        # Only the pieces that suit them: "girls dresses" drops the one cut for boys.
+        result["for"] = audience
+    return result
 
 
 __all__ = ["ShopifyError", "best_sellers", "cart_cards", "categories", "category_products", "find_category", "category_url", "collections", "collection_url", "customer_orders", "minor_to_major", "order_line_card", "find_order", "product_image", "product_url",

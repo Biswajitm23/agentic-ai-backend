@@ -99,19 +99,23 @@ async def go_to_checkout(page: str = "checkout") -> str:
 
 
 @tool
-async def compare_products(products: list[str]) -> str:
+async def compare_products(products: list[str], purpose: str = "") -> str:
     """Put two to four products side by side. Use for "compare X and Y", "X or Y -
     which is better", "what's the difference between X and Y".
 
     products: every product they named, as they named it, e.g.
       ["Catherine gingham dress", "Alice floral dress"].
+    purpose: what they want it for, in their words, whenever they said - "a formal
+      black outfit", "a beach wedding", "my 3 year old son", "under 3000".
     Returns each product with its specs and highlights, plus in_common and
     difference already worked out: one row per attribute that differs - price,
-    type, who for, sizes, colours, fabric, made in - each with a summary.
+    type, who for, sizes, colours, fabric, made in - each with a summary. With a
+    purpose, for_purpose checks each product against it (colour, who for, age,
+    budget) and names best_fit when one clearly meets the most.
     not_found lists any name that matched nothing, with did_you_mean.
     """
     try:
-        return json.dumps(await compare.compare(products), ensure_ascii=False)
+        return json.dumps(await compare.compare(products, purpose), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("compare_products", exc)
 
@@ -261,6 +265,11 @@ async def browse_category(category: str) -> str:
     "show me dresses", "what is in Winter Luxe", or a bare category name arriving
     on its own. Prefer it over search_products for a category - it returns the
     whole category, in stock, rather than a keyword guess.
+
+    Who it is for is a shelf too: "girls", "for my son", "baby", "products for
+    girls" return every piece tagged for them (kind "audience"; count is how many
+    we have, showing how many came back); "girls dresses" returns the dresses
+    that suit a girl.
 
     found=false means we have no such category, and it hands back the ones we do
     have: offer those instead of apologising. more_available=true means there are

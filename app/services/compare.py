@@ -11,6 +11,7 @@ import difflib
 import html
 import re
 
+from app.services import outfit
 from app.services.shopify_client import graphql
 from app.services.shopify_storefront import collection_tree, product_image, product_url, shop_info
 from app.services.suggestions import plural
@@ -123,6 +124,12 @@ def _highlights(description_html: str | None) -> list[str]:
 
 _LABEL_RE = re.compile(r"^\s*(?:material|fabric|composition)s?\s*:\s*", re.I)
 _PAREN_RE = re.compile(r"\s*\([^)]*\)")
+_SLASH_RE = re.compile(r"\s*/\s*")
+
+
+def _same_fabric_key(value: str) -> frozenset[str]:
+    """"Elastic/Metal Clasps/Leather Detailing" and the same parts in another order match."""
+    return frozenset(p.strip().lower() for p in re.split(r"[/,]", value) if p.strip())
 
 
 def _fabric(highlights: list[str], description: str) -> str | None:
@@ -132,7 +139,10 @@ def _fabric(highlights: list[str], description: str) -> str | None:
             # A bullet reads better than the bare word - "100% Organic Cotton",
             # not "cotton" - but "Material: 100% Alpaca Wool (lanolin free and
             # hypoallergenic)" is a sentence, not a spec.
+            # Tightened first: "Elastic / Metal Clasps / Leather Detailing" is 42
+            # characters, and cut to the bare "Leather" it passed for a leather belt.
             clean = _PAREN_RE.sub("", _LABEL_RE.sub("", bullet)).strip(" .;,")
+            clean = _SLASH_RE.sub("/", clean)
             return clean if len(clean) <= 40 else found.group(0)
     found = _FABRIC_RE.search(description or "")
     return found.group(0) if found else None
@@ -184,6 +194,7 @@ def _facts(node: dict, currency: str) -> dict:
         "url": product_url(node),
         "for": audience,
         "colours": colours,
+        "sizes": sizes,
         "size_range": size_range,
         "fabric": fabric,
         "made_in": made_in,
@@ -271,7 +282,7 @@ def _contrast(products: list[dict], currency: str) -> tuple[list[str], list[dict
 
     for field, label in (("fabric", "Fabric"), ("made_in", "Made in")):
         values = [p[field] for p in products]
-        if all(values) and len({v.lower() for v in values}) == 1:
+        if all(values) and len({_same_fabric_key(v) for v in values}) == 1:
             common.append(f"{label}: {values[0]} for {every.lower()}")
         elif any(values):
             # Known for some and not others is still worth a row, with the gap
@@ -281,13 +292,99 @@ def _contrast(products: list[dict], currency: str) -> tuple[list[str], list[dict
     return common, rows
 
 
+# Colours a shopper may ask for that none of the pieces carry - "neither comes in
+# black" needs the word recognised before it can be missed.
+_COLOUR_WORDS = {
+    "black", "white", "cream", "ivory", "beige", "grey", "gray", "navy", "blue", "red",
+    "pink", "green", "yellow", "orange", "purple", "lilac", "brown", "tan", "gold",
+    "silver", "khaki", "burgundy", "mint", "coral", "olive", "mustard", "teal",
+}
+_AGE_RE = re.compile(r"\b(\d{1,2})\s*-?\s*(?:years?|yrs?|y)\b(?:\s*-?\s*old)?", re.I)
+_BUDGET_RE = re.compile(
+    r"\b(?:under|below|less\s+than|within|max(?:imum)?|up\s+to|upto|budget(?:\s+of)?)\s*"
+    r"(?:rs\.?|inr|₹)?\s*(\d[\d,]*(?:\.\d+)?)",
+    re.I,
+)
+
+
+def _names(titles: list[str]) -> str:
+    return titles[0] if len(titles) == 1 else f"{', '.join(titles[:-1])} and {titles[-1]}"
+
+
+def _for_purpose(products: list[dict], purpose: str, currency: str) -> dict:
+    """How each product measures up to what the shopper wants it for.
+
+    Only what can be checked against the product's own data - the colour, who it
+    is cut for, an age, a budget. Whether a piece suits "formal" is left to the
+    agent, reading the rows; a check nothing passes is said so, never skipped.
+    """
+    text = purpose.lower()
+    words = set(_WORD_RE.findall(text))
+    every = "both" if len(products) == 2 else "all of them"
+    checks: list[dict] = []
+
+    def check(label: str, wanted: str, passes: list[dict]) -> None:
+        titles = [p["title"] for p in passes]
+        if not passes:
+            who, s = ("Neither" if len(products) == 2 else "None of them"), "s"
+        elif len(passes) == len(products):
+            who, s = every.capitalize(), ""
+        else:
+            who, s = f"Only {_names(titles)}", "s" if len(passes) == 1 else ""
+        summary = f"{who} {_NEEDS[label].format(w=wanted, s=s)}"
+        checks.append({"label": label, "wanted": wanted, "passes": titles, "summary": summary})
+
+    stocked = {c.lower() for p in products for c in p["colours"]}
+    for colour in sorted(w for w in words if w in _COLOUR_WORDS or w in stocked):
+        check("Colour", colour, [p for p in products if any(colour in c.lower() for c in p["colours"])])
+
+    audience = next((outfit._WHO[w] for w in _WORD_RE.findall(text) if w in outfit._WHO), None)
+    if audience:
+        # Untagged pieces suit anyone, so they pass too.
+        check("For", audience.lower(), [p for p in products if not p["for"] or audience in p["for"]])
+
+    age = _AGE_RE.search(text)
+    if age:
+        years = int(age.group(1))
+        check("Age", f"{years} years", [p for p in products if outfit._fits_age(p["sizes"], years)])
+
+    budget = _BUDGET_RE.search(text)
+    if budget:
+        limit = float(budget.group(1).replace(",", ""))
+        check("Budget", f"{limit:.2f} {currency}", [p for p in products if p["price_from"] <= limit])
+
+    result: dict = {"asked": purpose, "checks": checks}
+    # One product clearing more of the checks than any other is the fit. A tie -
+    # or nothing checkable - is the agent's to judge from the rows.
+    score = {p["title"]: sum(p["title"] in c["passes"] for c in checks) for p in products}
+    top = max(score.values(), default=0)
+    leaders = [t for t, s in score.items() if s == top]
+    if checks and len(leaders) == 1:
+        result["best_fit"] = leaders[0]
+    return result
+
+
+# How each check reads in a sentence; {s} is the verb's "s" for one product.
+_NEEDS = {
+    "Colour": "come{s} in {w}",
+    "For": "suit{s} {w}",
+    "Age": "come{s} in a size for {w}",
+    "Budget": "fit{s} a budget of {w}",
+}
+
+
 def _heading(products: list[dict]) -> str:
     types = list(dict.fromkeys(p["category"] for p in products if p.get("category")))
     return f"{' & '.join(types)} Comparison" if types else "Comparison"
 
 
-async def compare(names: list[str] | str) -> dict:
-    """Up to four named products, side by side, with what they share and how they differ."""
+async def compare(names: list[str] | str, purpose: str = "") -> dict:
+    """Up to four named products, side by side, with what they share and how they differ.
+
+    purpose: what the shopper wants it for, in their words - "a formal black
+    outfit", "my 3 year old son". Adds for_purpose: each checkable need, which
+    products meet it, and best_fit when one clearly meets the most.
+    """
     raw = names if isinstance(names, list) else [names]
     if len(raw) == 1:
         raw = _VERSUS_RE.split(str(raw[0]))     # "Alice vs Catherine" as one string
@@ -327,6 +424,9 @@ async def compare(names: list[str] | str) -> dict:
         "not_found": not_found,
         "products": products,
     }
+    purpose = " ".join(str(purpose or "").split())
+    if purpose and len(products) >= 2:
+        result["for_purpose"] = _for_purpose(products, purpose, currency)
     notes = []
     if dropped > 0:
         notes.append(f"Only the first {MAX_COMPARE} were compared; {dropped} more were named.")
