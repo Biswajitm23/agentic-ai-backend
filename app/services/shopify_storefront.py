@@ -678,6 +678,7 @@ query SupportProductCollections($cursor: String) {
     nodes {
       legacyResourceId
       title
+      handle
       productType
       collections(first: 25) { nodes { handle } }
     }
@@ -711,6 +712,7 @@ async def collection_tree() -> dict:
     type_of: dict[str, str] = {}
     ids: dict[str, str] = {}
     titles: dict[str, str] = {}
+    handles: dict[str, str] = {}
     type_products: dict[str, set[str]] = {}
     coll_products: dict[str, set[str]] = {}
     coll_types: dict[str, set[str]] = {}
@@ -727,6 +729,7 @@ async def collection_tree() -> dict:
             type_of[node["title"].strip().lower()] = ptype
             ids[node["title"].strip().lower()] = pid
             titles[pid] = node["title"].strip()
+            handles[pid] = node["handle"]
             type_products.setdefault(ptype, set()).add(pid)
             for coll in node["collections"]["nodes"]:
                 if coll["handle"] in published:
@@ -761,7 +764,7 @@ async def collection_tree() -> dict:
         handle: sorted((home[t] for t in types if t in home), key=fullest)
         for handle, types in broad.items()
     }
-    tree = {"type_of": type_of, "ids": ids, "titles": titles,
+    tree = {"type_of": type_of, "ids": ids, "titles": titles, "handles": handles,
             "home": home, "parent": parent, "children": children,
             "collection_type": collection_type, "cards": published}
     _tree_cache = (time.monotonic(), tree)

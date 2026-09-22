@@ -18,7 +18,7 @@ from app.core.config import settings
 from app.db.session import AsyncSessionLocal
 from app.services import compare, handbook, order_changes, outfit, shopify_storefront, store_profile
 from app.services import shopper_identity as identity
-from app.services.shopify_client import ShopifyError
+from app.services.shopify_client import ShopifyError, store_domain
 
 logger = logging.getLogger(__name__)
 
@@ -59,6 +59,43 @@ async def check_order_status(order_number: str, email: str) -> str:
         )
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("check_order_status", exc)
+
+
+@tool
+async def add_to_cart(items: list[dict]) -> str:
+    """Put products in the shopper's bag. The storefront does the adding; this
+    finds the exact variant and tells it which.
+
+    items: [{"product": "<name or handle>", "color": "Pink", "size": "5Y", "quantity": 1}]
+      "this"/"it" is the product they are viewing. For variants a tool already
+      gave you - build_outfit's cart_items - send [{"variant_id": "...", "quantity": 1}].
+      Leave out color or size only where the product has none.
+    done=true: it is going in - confirm in one line what was added.
+    needs_choice: nothing was added; ask for exactly what it lists as missing,
+      from its available options, then call again. Never choose a size for them.
+    problems: out of stock, no such option, or not found - say which.
+    """
+    try:
+        return json.dumps(await outfit.cart_additions(items), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("add_to_cart", exc)
+
+
+@tool
+async def go_to_checkout(page: str = "checkout") -> str:
+    """Take the shopper to checkout - "checkout", "pay", "buy now", "place my order".
+    page="cart" opens their bag instead. The storefront does the navigating."""
+    target = "cart" if str(page).strip().lower() == "cart" else "checkout"
+    return json.dumps({
+        "done": True,
+        "page": target,
+        "action": {
+            "type": "redirect",
+            "page": target,
+            "url": f"/{target}",
+            "absolute_url": f"https://{store_domain()}/{target}",
+        },
+    })
 
 
 @tool
@@ -406,6 +443,8 @@ CUSTOMER_SUPPORT_TOOLS = [
     get_best_sellers,
     suggest_pieces,
     compare_products,
+    add_to_cart,
+    go_to_checkout,
     browse_catalogue,
     build_outfit,
     check_order_status,

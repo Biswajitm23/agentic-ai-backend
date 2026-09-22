@@ -73,6 +73,14 @@ def _ratio(a: str, b: str) -> float:
     return difflib.SequenceMatcher(None, a, b).ratio()
 
 
+def matches(name: str, ids: dict[str, str]) -> list[str]:
+    """Every title holding all the words the shopper used, best match first."""
+    wanted = " ".join(name.lower().split())
+    want = _stems(wanted)
+    found = [t for t in ids if want and want <= _stems(t)]
+    return sorted(found, key=lambda t: -_ratio(wanted, t))
+
+
 def resolve(name: str, ids: dict[str, str], titles: dict[str, str]) -> tuple[str | None, list[str]]:
     """The product a shopper's name points at, or the nearest titles if none does.
 
@@ -85,10 +93,10 @@ def resolve(name: str, ids: dict[str, str], titles: dict[str, str]) -> tuple[str
         return None, []
     if wanted in ids:
         return ids[wanted], []
-    want = _stems(wanted)
-    containing = [t for t in ids if want and want <= _stems(t)]
+    containing = matches(wanted, ids)
     if containing:
-        return ids[max(containing, key=lambda t: _ratio(wanted, t))], []
+        return ids[containing[0]], []
+    want = _stems(wanted)
     ranked = sorted(ids, key=lambda t: (-len(want & _stems(t)), -_ratio(wanted, t)))
     if ranked and _ratio(wanted, ranked[0]) >= _MATCH_RATIO:
         return ids[ranked[0]], []

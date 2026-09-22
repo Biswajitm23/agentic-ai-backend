@@ -273,6 +273,9 @@ class CardCollector:
         self.products: dict | None = None
         self.products_whole = False
         self.products_fixed = False
+        # Instructions for the widget - add these variants, open checkout - in
+        # the order the agent issued them.
+        self.actions: list[dict] = []
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -283,6 +286,13 @@ class CardCollector:
 
     def take(self, tool_name: str, output: str | None) -> tuple[str, dict] | None:
         """Record a tool result. Returns (event_name, payload) when it had cards."""
+        if output and '"action"' in output:
+            try:
+                action = json.loads(output).get("action")
+            except (TypeError, ValueError, AttributeError):
+                action = None
+            if isinstance(action, dict) and action.get("type"):
+                self.actions.append(action)
         if tool_name == "browse_category" and output:
             try:
                 found = json.loads(output)
@@ -353,6 +363,15 @@ class CardCollector:
         # whole list there was worse than showing none: it put girls' party
         # dresses under "I have nothing for a 9 year old boy".
         self.products = {**self.products, "items": kept} if kept else None
+
+    def drop_empty_checkout(self) -> None:
+        """Take out a checkout redirect when the bag is empty - unless this very turn
+        put something in it. The agent said "your bag is empty" and still called
+        checkout, which would have sent the shopper to an empty checkout page."""
+        if any(a.get("type") == "add_to_cart" for a in self.actions):
+            return
+        self.actions = [a for a in self.actions
+                        if not (a.get("type") == "redirect" and a.get("page") == "checkout")]
 
     def limit_products(self, count: int | None) -> None:
         """Hold the product row to what the shopper asked for - "2 jackets" is two

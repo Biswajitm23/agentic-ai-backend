@@ -166,6 +166,162 @@ async def browse_catalogue() -> dict:
     }
 
 
+# ── Adding to the shopper's bag ────────────────────────────────────────────
+# The cart lives in the shopper's browser session, not here, so nothing below
+# writes to it. What they asked for is resolved to exact, buyable variants, and
+# the result carries an instruction the widget carries out with the storefront's
+# own cart API. _match_variant alone would happily take the first in-stock size
+# when none was named - fine for pricing a look, wrong for someone's bag - so a
+# real choice left unmade comes back as a question instead.
+
+VARIANT_BY_ID = """
+query CartVariant($id: ID!) {
+  productVariant(id: $id) {
+    legacyResourceId
+    title
+    price
+    availableForSale
+    media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+    product {
+      legacyResourceId
+      title
+      handle
+      status
+      onlineStoreUrl
+      featuredMedia { ... on MediaImage { image { url } } }
+    }
+  }
+}
+"""
+
+MAX_CART_QUANTITY = 10
+
+
+def _cart_line(product: dict, variant: dict, quantity: int) -> dict:
+    unit = _money(variant["price"])
+    variant_id = variant.get("legacyResourceId")
+    return {
+        "variant_id": variant_id,
+        "product_id": product.get("legacyResourceId"),
+        "title": product["title"],
+        "option": None if variant.get("title") == "Default Title" else variant.get("title"),
+        "quantity": quantity,
+        "unit_price": float(unit),
+        "line_total": float(unit * quantity),
+        "image": variant_image(variant) or product_image(product),
+        "url": product_url(product, variant_id),
+    }
+
+
+async def cart_additions(items: list[dict]) -> dict:
+    """What to add to the bag, as exact variants, and the instruction to add them.
+
+    Each item names a product ("Catherine gingham dress", or a handle) with its
+    colour, size and quantity - or gives a variant id a tool already produced,
+    such as build_outfit's cart_items. The instruction is only issued when every
+    item resolved: half a request quietly added is worse than one more question.
+    """
+    from app.services import compare
+    from app.services.shopify_storefront import collection_tree
+
+    currency = (await shop_info())["currency"]
+    lines: list[dict] = []
+    needs_choice: list[dict] = []
+    problems: list[dict] = []
+    tree: dict | None = None
+
+    for item in items or []:
+        if not isinstance(item, dict):
+            continue
+        try:
+            quantity = min(MAX_CART_QUANTITY, max(1, int(item.get("quantity") or 1)))
+        except (TypeError, ValueError):
+            quantity = 1
+
+        variant_id = str(item.get("variant_id") or "").strip()
+        if variant_id:
+            node = (
+                await graphql(VARIANT_BY_ID, {"id": f"gid://shopify/ProductVariant/{variant_id}"})
+            )["productVariant"]
+            product = (node or {}).get("product") or {}
+            if not node or product.get("status") != "ACTIVE":
+                problems.append({"variant_id": variant_id, "reason": "not_found_or_not_for_sale"})
+            elif not node["availableForSale"]:
+                problems.append({"title": product["title"], "option": node["title"], "reason": "out_of_stock"})
+            else:
+                lines.append(_cart_line(product, node, quantity))
+            continue
+
+        name = str(item.get("product") or item.get("handle") or item.get("title") or "").strip()
+        if not name:
+            problems.append({"reason": "no_product_named"})
+            continue
+        if tree is None:
+            tree = await collection_tree()
+        handle = name if name in tree["handles"].values() else None
+        if handle is None and " ".join(name.lower().split()) not in tree["ids"]:
+            rivals = compare.matches(name, tree["ids"])
+            if len(rivals) > 1:
+                # Two products answer to the name ("Catherine gingham dress" is two
+                # listings). A comparison can live with the nearer one; a bag cannot.
+                needs_choice.append({
+                    "asked_for": name,
+                    "missing": ["product"],
+                    "which_product": [tree["titles"][tree["ids"][t]] for t in rivals[:4]],
+                })
+                continue
+        if handle is None:
+            product_id, near = compare.resolve(name, tree["ids"], tree["titles"])
+            if product_id is None:
+                problems.append({"asked_for": name, "reason": "not_found", "did_you_mean": near})
+                continue
+            handle = tree["handles"][product_id]
+        product = next(iter(await _active_products([handle])), None)
+        if product is None:
+            problems.append({"asked_for": name, "reason": "not_found_or_not_for_sale"})
+            continue
+
+        options = _options_of(product)
+        colours = options.get("Color") or options.get("Colour") or []
+        sizes = options.get("Size") or []
+        colour = item.get("color") or item.get("colour") or (colours[0] if len(colours) == 1 else None)
+        size = item.get("size") or (sizes[0] if len(sizes) == 1 else None)
+        missing = [name for name, chosen, offered in (("color", colour, colours), ("size", size, sizes))
+                   if not chosen and len(offered) > 1]
+        if missing:
+            needs_choice.append({
+                "title": product["title"],
+                "missing": missing,
+                "available_colors": colours,
+                "available_sizes": sizes,
+            })
+            continue
+
+        variant = _match_variant(product, colour, size)
+        if variant is None:
+            problems.append({"title": product["title"], "reason": "no_variant_for_that_choice",
+                             "available_colors": colours, "available_sizes": sizes})
+        elif not variant["availableForSale"]:
+            problems.append({"title": product["title"], "option": variant["title"], "reason": "out_of_stock"})
+        else:
+            lines.append(_cart_line(product, variant, quantity))
+
+    done = bool(lines) and not needs_choice and not problems
+    result: dict = {
+        "done": done,
+        "currency": currency,
+        "lines": lines,
+        "needs_choice": needs_choice,
+        "problems": problems,
+    }
+    if done:
+        result["action"] = {
+            "type": "add_to_cart",
+            "items": [{"variant_id": line["variant_id"], "quantity": line["quantity"]} for line in lines],
+        }
+    return result
+
+
 # ── Suggesting as the conversation goes ────────────────────────────────────
 # An outfit conversation used to be an interrogation - age, occasion, colour,
 # budget, one reply after another with nothing to look at. Told to show pieces

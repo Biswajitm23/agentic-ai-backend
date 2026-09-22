@@ -27,6 +27,7 @@ from app.agent.customer_support_agent.shopper_context import (
     describe,
     with_context,
 )
+from app.api.v1 import cart_actions
 from app.api.v1.cards import CardCollector
 from app.services import shopify_storefront, shopper_identity as identity
 from app.services import store_profile, suggestions
@@ -310,9 +311,17 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
       outfit  - {items[], currency, total,        a complete look: the same cards plus
                  budget, within_budget,           the exact total and the variants to
                  cart_items[]}                    add to the bag
+      action  - {type: "add_to_cart", items[]}   the agent's own add or redirect, with
+                | {type: "redirect", page, url}  exact variant ids; one per call it made
+      actions - {"action"}                       what the shopper asked of their bag:
+                                                 "add previous products in cart",
+                                                 "checkout" (with the products shown),
+                                                 or "checkout from existing" (only
+                                                 what is already in the bag)
       done    - {"session_id", "reply",          the finished reply, repeating
-                 products?, outfit?,             whatever cards were produced
-                 greeting?, collections?}
+                 products?, outfit?,             whatever cards were produced, the
+                 greeting?, collections?,        `action` list and the `actions`
+                 actions?, cart_action?}         word
       error   - {"message"}                      the turn failed; nothing was saved
     """
     session_id = _resolve_session(req.session_id)
@@ -408,8 +417,23 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # gets the cards without having to follow the stream.
         cards.finalise(reply)
         cards.limit_products(requested)
+        if req.cart is not None and not req.cart.items:
+            cards.drop_empty_checkout()
         for name, payload in cards.as_dict().items():
             yield _sse(name, payload)
+        # The widget carries these out, in order: add these variants to the bag,
+        # take them to checkout. Repeated in `done` for a client that only reads
+        # the last event - carry each out once, from one place or the other.
+        for action in cards.actions:
+            yield _sse("action", action)
+        # The plainer signal: add what the widget showed, check out with it, or
+        # check out with only what is in the bag - which, empty, goes nowhere.
+        cart_action = cart_actions.cart_action(req.message, cards.actions)
+        if (cart_action == cart_actions.CHECKOUT_FROM_EXISTING
+                and req.cart is not None and not req.cart.items):
+            cart_action = None
+        if cart_action:
+            yield _sse("actions", {"action": cart_action})
 
         try:
             chips = await suggestions.for_turn(
@@ -426,6 +450,10 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             done_payload["suggestions"] = chips
         if cart_payload:
             done_payload["cart"] = cart_payload
+        if cards.actions:
+            done_payload["actions"] = cards.actions
+        if cart_action:
+            done_payload["cart_action"] = cart_action
         yield _sse("done", done_payload)
 
     return StreamingResponse(events(), media_type="text/event-stream", headers=SSE_HEADERS)
