@@ -37,8 +37,6 @@ MAX_CARDS = 12
 # a grid the shopper explicitly asked to see.
 WHOLE_RESULT_TOOLS = {"browse_category"}
 
-# Tools whose products are never trimmed to the wording. A comparison is every
-# product in it, whichever of them the reply happens to name in full.
 # Tools that change the bag: where their result keeps what changed, what kind
 # of change it is, and how the cards are headed.
 BAG_TOOLS = {
@@ -47,6 +45,8 @@ BAG_TOOLS = {
     "edit_cart": ("changed", "edited", "Your bag was updated"),
 }
 
+# Tools whose products are never trimmed to the wording. A comparison is every
+# product in it, whichever of them the reply happens to name in full.
 FIXED_RESULT_TOOLS = {"compare_products", *BAG_TOOLS}
 
 
@@ -344,6 +344,8 @@ class CardCollector:
         # What went into or came out of the bag this turn, one card set per call.
         # When there is any, it is the only products sent.
         self.bag_cards: list[dict] = []
+        # Every collection, when the shopper asked to see them all: sent as chips.
+        self.collections_listed: list[dict] = []
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -372,6 +374,12 @@ class CardCollector:
                 self.cart_choice = result.get("needs_choice") or []
             except (TypeError, ValueError, AttributeError):
                 self.cart_waiting, self.cart_choice = True, []
+        if tool_name in ("list_collections", "browse_category") and output and '"listing": "collections"' in output:
+            try:
+                self.collections_listed = json.loads(output).get("collections") or []
+            except (TypeError, ValueError, AttributeError):
+                self.collections_listed = []
+            return None
         if tool_name == "browse_category" and output:
             try:
                 found = json.loads(output)

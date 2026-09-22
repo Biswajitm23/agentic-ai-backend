@@ -152,6 +152,15 @@ _SIZE_WORD_RE = re.compile(r"\bsizes?\b", re.I)
 _COLOUR_WORD_RE = re.compile(r"\bcolou?rs?\b", re.I)
 
 
+def collection_chips(collections: list[dict]) -> list[dict]:
+    """Every collection as a chip - the answer to "show me all your collections".
+
+    All of them, not a handful: the shopper asked to see what there is.
+    """
+    return [{"label": c["title"], "prompt": f"What is in {c['title']}?", "kind": "collection",
+             "id": c.get("handle")} for c in collections if c.get("title")]
+
+
 def _title_forms(title: str) -> list[str]:
     """How a reply shortens a title, longest first: "George Check Long Sleeve Shirt
     in Blue (12mths-10yrs)" is written "the George Check Long Sleeve Shirt"."""

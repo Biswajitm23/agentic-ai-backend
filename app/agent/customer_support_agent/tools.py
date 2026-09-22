@@ -306,6 +306,42 @@ async def build_outfit(items: str | list, budget: float = 0) -> str:
 
 
 
+# Words that ask for the list of shelves, not for one shelf: "collections" is
+# not a collection, and browsing for it answered "we have no section called
+# collections" to a shopper asking to see them all.
+_LIST_OF_SHELVES = {
+    "collection", "collections", "all collections", "category", "categories", "all categories",
+    "section", "sections", "department", "departments", "range", "ranges", "shop all", "all",
+    "everything", "all products", "the collections", "your collections", "your categories",
+}
+
+
+async def _collection_list() -> dict:
+    found = await shopify_storefront.collections(shopify_storefront.COLLECTION_LIMIT)
+    return {
+        "listing": "collections",
+        "count": found["count"],
+        "collections": [{"title": c["title"], "handle": c["handle"], "product_count": c.get("product_count")}
+                        for c in found["collections"]],
+        "tell_customer": "Say in one line that here are our collections. The storefront shows "
+                         "every one as a button to tap - never list, number or recite them.",
+    }
+
+
+@tool
+async def list_collections() -> str:
+    """Every collection the store has - "show me all your collections", "what
+    categories do you have", "what sections are there". No arguments.
+
+    The storefront shows each one as a button to tap, so say in one line that
+    here they are, and never list or number them yourself.
+    """
+    try:
+        return json.dumps(await _collection_list(), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("list_collections", exc)
+
+
 @tool
 async def browse_category(category: str) -> str:
     """Every product in ONE category the shopper named or tapped.
@@ -335,6 +371,8 @@ async def browse_category(category: str) -> str:
     rather than passing them off as part of the category.
     """
     try:
+        if " ".join(str(category or "").lower().split()) in _LIST_OF_SHELVES:
+            return json.dumps(await _collection_list(), ensure_ascii=False)
         return json.dumps(
             await shopify_storefront.category_products(category), ensure_ascii=False
         )
@@ -505,6 +543,7 @@ async def confirm_order_change(
 CUSTOMER_SUPPORT_TOOLS = [
     search_products,
     browse_category,
+    list_collections,
     get_best_sellers,
     suggest_pieces,
     compare_products,

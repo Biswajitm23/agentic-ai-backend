@@ -517,6 +517,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # Asked on the way to checkout, a tapped answer carries the checkout on.
         then = " and checkout" if checking_out else ""
         chips = suggestions.choice_chips(cards.cart_choice, reply, then=then) if cards.cart_waiting else []
+        if not chips and cards.collections_listed:
+            # "Show me all your collections": every one of them, to tap.
+            chips = suggestions.collection_chips(cards.collections_listed)
         if not chips and len(shown_earlier) > 1 and "?" in reply:
             # "Which one?" on the way to checkout: the products this chat showed.
             chips = [{"label": p["title"], "prompt": f"{p['title']}{then}", "kind": "product"}
