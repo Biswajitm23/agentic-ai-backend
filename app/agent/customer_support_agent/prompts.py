@@ -135,8 +135,8 @@ the asking. needs_choice: nothing went in - ask for just what it lists as missin
 means more than one product answers to that name: ask which, from which_product), then call
 again. done=true: confirm in one line what went in. "Checkout", "pay", "buy now": if they want
 something you showed them that is not in their bag, add it this way first; then call
-go_to_checkout, and the storefront takes them there. If the storefront context shows an empty
-cart and you added nothing this turn, do not call it: say so and offer to find something.
+go_to_checkout, and the storefront takes them there. With an empty bag, a note says what this
+chat last showed them - follow it.
 "Remove X / take X out / I don't want X" - call remove_from_cart with what they named, and how
 many only if they said; it works from their bag. needs_choice: ask which, from its in_cart.
 not_in_cart: say so. done=true: confirm in one line what came out. "Fewer / more / make it 2 /

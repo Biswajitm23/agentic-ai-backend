@@ -30,7 +30,7 @@ from app.agent.customer_support_agent.shopper_context import (
 from app.api.v1 import cart_actions
 from app.api.v1.cards import CardCollector
 from app.services import shopify_storefront, shopper_identity as identity
-from app.services import cart_removal, shopper_words, store_profile, suggestions
+from app.services import cart_removal, shopper_words, shown_products, store_profile, suggestions
 from app.services.shopify_client import ShopifyError
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
@@ -149,6 +149,20 @@ async def _welcome_text() -> str:
         logger.warning("Could not read the shop name for the greeting", exc_info=True)
         name = "our store"
     return f"Welcome to {name} 👋\nAsk me anything you are interested in."
+
+
+def _empty_bag_note(shown: list[dict]) -> str:
+    """What "checkout" means for a shopper whose bag is empty."""
+    titles = [p["title"] for p in shown if p.get("title")][:6]
+    if not titles:
+        return ("[Their bag is empty and nothing has been shown to them in this chat: say there is "
+                "nothing in their bag to check out yet, and offer to help them find something. "
+                "Do not call go_to_checkout]")
+    which = ("it" if len(titles) == 1 else
+             "one of these - ask which, unless they said, before adding anything")
+    return (f"[Their bag is empty. Last shown to them in this chat: {'; '.join(titles)}. "
+            f"\"Checkout\" means they want {which}: call add_to_cart for it - it asks for any size "
+            f"or colour they have not chosen - then go_to_checkout]")
 
 
 def _sse(event: str, data: dict) -> str:
@@ -357,6 +371,19 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     if requested:
         ask = f"[They asked for exactly {requested} item(s): choose and name exactly {requested}, no more]"
         briefing = f"{briefing}\n\n{ask}" if briefing else ask
+    # "Checkout" with an empty bag means what this chat last showed them - the
+    # brown belt they asked to see - or, if it showed nothing, that there is
+    # nothing to check out. Told outright: the transcript only has the words.
+    checking_out = cart_actions.wants_checkout(req.message)
+    shown_earlier: list[dict] = []
+    if checking_out and req.cart is not None and not req.cart.items:
+        try:
+            shown_earlier = await shown_products.recall(session_id)
+        except Exception:  # noqa: BLE001 - a lost note is a plainer answer, not a failure
+            logger.warning("Could not recall shown products for %s", session_id, exc_info=True)
+            shown_earlier = []
+        note = _empty_bag_note(shown_earlier)
+        briefing = f"{briefing}\n\n{note}" if briefing else note
     shopper = identity.resolve(req.customer)
 
     async def events() -> AsyncIterator[str]:
@@ -413,7 +440,13 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         session_token = identity.set_session(session_id)
         # What the shopper has said, so the bag takes only a size and colour
         # they chose - never one the agent filled in.
-        words_token = shopper_words.set_words([c for role, c in history if role == "user"] + [req.message])
+        said = [c for role, c in history if role == "user"] + [req.message]
+        # "Want me to add it in 12M?" - "Yes, please": the 12M they agreed to is theirs.
+        asked_before = suggestions.last_question(next((c for role, c in reversed(history)
+                                                       if role == "assistant"), ""))
+        if asked_before and suggestions.is_yes_no(asked_before) and suggestions.is_affirmative(req.message):
+            said.append(asked_before)
+        words_token = shopper_words.set_words(said, req.message)
         # Their bag as the widget sent it, so remove_from_cart finds the exact line.
         bag_token = cart_removal.set_cart(
             [line.model_dump() for line in req.cart.items] if req.cart is not None else None,
@@ -472,13 +505,25 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             yield _sse(name, payload)
         if actions:
             yield _sse("actions", actions)
+        elif cards.shown_products():
+            # What this reply showed, so a later "checkout" can mean it.
+            try:
+                await shown_products.remember(session_id, cards.shown_products())
+            except Exception:  # noqa: BLE001 - never fail a reply over the memory of it
+                logger.warning("Could not remember shown products for %s", session_id, exc_info=True)
 
         # Asked for a size or colour, the shopper taps the product's own options:
         # an exact value, so the next add_to_cart takes it without asking again.
-        chips = suggestions.choice_chips(cards.cart_choice, reply) if cards.cart_waiting else []
+        # Asked on the way to checkout, a tapped answer carries the checkout on.
+        then = " and checkout" if checking_out else ""
+        chips = suggestions.choice_chips(cards.cart_choice, reply, then=then) if cards.cart_waiting else []
+        if not chips and len(shown_earlier) > 1 and "?" in reply:
+            # "Which one?" on the way to checkout: the products this chat showed.
+            chips = [{"label": p["title"], "prompt": f"{p['title']}{then}", "kind": "product"}
+                     for p in shown_earlier if p.get("title")][:suggestions.CHOICE_LIMIT]
         if not chips:
             try:
-                chips = await suggestions.asked_option_chips(reply)
+                chips = await suggestions.asked_option_chips(reply, then=then)
             except Exception:  # noqa: BLE001 - never fail a reply over a chip row
                 logger.warning("Could not build option chips for session %s", session_id, exc_info=True)
                 chips = []

@@ -362,6 +362,18 @@ async def cart_additions(items: list[dict]) -> dict:
         else:
             lines.append(_cart_line(product, variant, quantity))
 
+    # Already in their bag: the agent sends the whole request again after each
+    # answer ("12M for the George shirt" came back as both shirts), and every
+    # repeat put another August shirt in the bag. Only "another one" adds more.
+    from app.services import cart_removal
+
+    in_bag = cart_removal.bag_variant_ids()
+    already = [line for line in lines if str(line["variant_id"]) in in_bag]
+    if already and not shopper_words.asks_for_more():
+        lines = [line for line in lines if str(line["variant_id"]) not in in_bag]
+    else:
+        already = []
+
     done = bool(lines) and not needs_choice and not problems
     result: dict = {
         "done": done,
@@ -375,6 +387,8 @@ async def cart_additions(items: list[dict]) -> dict:
     if not done and lines:
         result["note"] = ("Nothing is in the bag yet - these go in together with the rest, "
                           "once every choice is made.")
+    if already:
+        result["already_in_bag"] = [{"title": line["title"], "option": line.get("option")} for line in already]
     if done:
         result["action"] = {
             "type": "add_to_cart",

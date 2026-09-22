@@ -78,6 +78,8 @@ async def add_to_cart(items: list[dict]) -> str:
       chose, not them: offer it if you like, but they must say it. The shopper
       is shown the options as buttons.
     problems: out of stock, no such option, or not found - say which.
+    already_in_bag: those were in their bag already and were not added again -
+      say so; only "another one" / "one more" adds a second.
     """
     try:
         return json.dumps(await outfit.cart_additions(items), ensure_ascii=False)

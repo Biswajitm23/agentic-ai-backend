@@ -31,6 +31,12 @@ def reset(token) -> None:
     _cart.reset(token)
 
 
+def bag_variant_ids() -> set[str]:
+    """The variants already in the shopper's bag, or an empty set if it was not sent."""
+    bound = _cart.get()
+    return {str(line.get("variant_id")) for line in (bound[0] if bound else []) if line.get("variant_id")}
+
+
 def _options(line: dict) -> list[str]:
     return [p.strip() for p in str(line.get("variant_title") or "").split("/") if p.strip()]
 

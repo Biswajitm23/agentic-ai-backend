@@ -95,13 +95,21 @@ def _questions_in(reply: str) -> str:
 CHOICE_LIMIT = 10     # a size run is longer than a row of topic chips
 
 
-def choice_chips(needs_choice: list[dict], reply: str = "") -> list[dict]:
+def choice_chips(needs_choice: list[dict], reply: str = "", then: str = "") -> list[dict]:
     """The exact options add_to_cart is waiting on, for the first product that needs one.
 
     Tapped, a chip says "5Y for the Catherine Gingham dress": the shopper's own
     choice, in the product's own spelling, so it goes in without asking again.
     The option the reply asked about comes first when it asked about one.
+
+    then: what the shopper was on the way to - " and checkout" - added to every
+    prompt, so the tapped answer carries it on.
     """
+    chips = _choice_chips(needs_choice, reply)
+    return [{**c, "prompt": c["prompt"] + then} for c in chips] if then else chips
+
+
+def _choice_chips(needs_choice: list[dict], reply: str) -> list[dict]:
     asked = _questions_in(reply).lower()
     for entry in needs_choice or []:
         missing = entry.get("missing") or []
@@ -144,13 +152,66 @@ _SIZE_WORD_RE = re.compile(r"\bsizes?\b", re.I)
 _COLOUR_WORD_RE = re.compile(r"\bcolou?rs?\b", re.I)
 
 
-async def asked_option_chips(reply: str) -> list[dict]:
+def _title_forms(title: str) -> list[str]:
+    """How a reply shortens a title, longest first: "George Check Long Sleeve Shirt
+    in Blue (12mths-10yrs)" is written "the George Check Long Sleeve Shirt"."""
+    bare = re.sub(r"\s*\([^)]*\)", "", title).strip()
+    plain = re.sub(r"\s+in\s+[^()]*$", "", bare).strip()
+    return [f for f in dict.fromkeys((title, bare, plain)) if len(f) >= 8]
+
+
+def _named_product(text: str, tree: dict) -> str | None:
+    """The one product a piece of text names, or None for none or several."""
+    lowered = (text or "").lower().replace("’", "'")
+    found: dict[str, int] = {}
+    for title, product_id in tree["ids"].items():
+        form = next((f for f in _title_forms(title) if f in lowered), None)
+        if form:
+            found[product_id] = max(found.get(product_id, 0), len(form))
+    if not found:
+        return None
+    longest = max(found.values())
+    leaders = [pid for pid, length in found.items() if length == longest]
+    return leaders[0] if len(leaders) == 1 else None
+
+
+def _all_named(text: str, tree: dict) -> list[str]:
+    """Every product a piece of text names, in the order it names them."""
+    lowered = (text or "").lower().replace("’", "'")
+    hits = []
+    for title, product_id in tree["ids"].items():
+        form = next((f for f in _title_forms(title) if f in lowered), None)
+        if form:
+            hits.append((lowered.find(form), len(form), product_id))
+    named, taken_until = [], -1
+    for start, length, product_id in sorted(hits, key=lambda h: (h[0], -h[1])):
+        if start >= taken_until and product_id not in named:
+            named.append(product_id)
+            taken_until = start + length
+    return named
+
+
+async def either_chips(reply: str) -> list[dict]:
+    """"The Brown Striped Belt or the Cream Boy's Belt?" - the products it offers, as chips."""
+    asked = last_question(reply)
+    if not re.search(r"\bor\b", asked, re.I):
+        return []
+    tree = await shopify_storefront.collection_tree()
+    named = _all_named(asked, tree)
+    if len(named) < 2:
+        return []
+    return [{"label": tree["titles"][pid], "prompt": tree["titles"][pid], "kind": "product"}
+            for pid in named][:CHOICE_LIMIT]
+
+
+async def asked_option_chips(reply: str, then: str = "") -> list[dict]:
     """A size or colour question the agent asked itself, answered with that product's options.
 
     "What size for the Cream Boy's Belt?" came with Explore Dresses under it: the
     agent asked on its own rather than through add_to_cart, so no options came
-    back with the question. The product must be named in the question itself -
-    nothing is guessed - and must actually offer more than one of what was asked.
+    back with the question. The product must be named - in the question, or as
+    the only product in the reply - and must actually offer more than one of
+    what was asked; nothing is guessed.
     """
     asked = _questions_in(reply).replace("’", "'")
     size_at = _SIZE_WORD_RE.search(asked)
@@ -158,11 +219,11 @@ async def asked_option_chips(reply: str) -> list[dict]:
     if not (size_at or colour_at):
         return []
     tree = await shopify_storefront.collection_tree()
-    lowered = asked.lower()
-    named = [title for title in tree["ids"] if title in lowered]
-    if not named:
+    # Named in the question - or, when the question only says "its size", the
+    # one product the rest of the reply is about.
+    product_id = _named_product(asked, tree) or _named_product(reply, tree)
+    if product_id is None:
         return []
-    product_id = tree["ids"][max(named, key=len)]
     title, handle = tree["titles"][product_id], tree["handles"][product_id]
 
     from app.services import outfit
@@ -177,7 +238,56 @@ async def asked_option_chips(reply: str) -> list[dict]:
     if not values or len(values) < 2:
         return []
     kind = "size" if by_size else "colour"
-    return [{"label": v, "prompt": f"{v} for the {title}", "kind": kind} for v in values][:CHOICE_LIMIT]
+    return [{"label": v, "prompt": f"{v} for the {title}{then}", "kind": kind} for v in values][:CHOICE_LIMIT]
+
+
+YES_NO_CHIPS = [
+    {"label": "Yes, please", "prompt": "Yes, please", "kind": "yes"},
+    {"label": "No, thanks", "prompt": "No, thanks", "kind": "no"},
+]
+_YES_NO_RE = re.compile(
+    r"^\s*(?:do|does|did|would|will|shall|should|can|could|may|is|are|was|were|want|wanna|"
+    r"have|has|ready|happy|fancy|need|ok|okay)\b"
+    r"|\b(?:want me to|shall i|should i|like me to|do you want|ok to|okay to|happy for me to)\b",
+    re.I,
+)
+_AFFIRMATIVE_RE = re.compile(
+    r"^\s*(?:yes|yeah|yep|yup|ya|sure|ok|okay|please|go ahead|do it|sounds good|perfect|"
+    r"great|correct|that'?s? (?:fine|right|good|great))\b",
+    re.I,
+)
+_CHOICE_LIST_RE = re.compile(r"^\s*\d+[.)]\s")
+
+
+def last_question(reply: str) -> str:
+    """The last thing the reply asked, or ""."""
+    asked = _QUESTION_RE.findall(reply or "")
+    return asked[-1].strip() if asked else ""
+
+
+def is_yes_no(question: str) -> bool:
+    """A question answered yes or no - "want me to add it?", not "pink or blue?"."""
+    # "The first size is 12M; want me to add it?" - the asking part is the last clause.
+    tail = re.split(r"[;:–—]|\s-\s", question or "")[-1]
+    return bool(_YES_NO_RE.search(tail)) and not re.search(r"\bor\b", tail, re.I)
+
+
+def is_affirmative(message: str) -> bool:
+    """A short yes - "yes please", "sure", "go ahead"."""
+    return bool(_AFFIRMATIVE_RE.search(message or "")) and len((message or "").split()) <= 8
+
+
+def _ends_in_choices(reply: str) -> bool:
+    """The reply ends with "1." "2." choices, which the storefront draws as buttons itself."""
+    lines = [line for line in (reply or "").splitlines() if line.strip()]
+    return bool(lines) and bool(_CHOICE_LIST_RE.match(lines[-1]))
+
+
+def answer_chips(reply: str) -> list[dict]:
+    """For a question nothing more specific answers: yes and no, or nothing at all."""
+    if _ends_in_choices(reply):
+        return []
+    return [dict(c) for c in YES_NO_CHIPS] if is_yes_no(last_question(reply)) else []
 
 
 def question_chips(reply: str, colours: list[str] | None = None) -> list[dict]:
@@ -315,7 +425,8 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
                    reply: str = "", shown_products: list[dict] | None = None) -> list[dict]:
     """Chips to offer after a reply, most relevant first.
 
-    1. A reply that asks the shopper something gets chips that answer it.
+    1. A reply that asks the shopper something gets chips that answer it - and
+       only those: yes and no when nothing more specific fits, else none.
     2. Otherwise the shelves around what they are looking at: the collections of
        the products this reply showed and their neighbours, or what sits under a
        collection they named. Up to five.
@@ -332,6 +443,17 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
     # fill the rest in place of the collection.
     offers_best = bool(re.search(r"best.?sell|most popular|popular pieces|top (?:selection|pick)s?",
                                  _questions_in(reply), re.I))
+
+    # A question is answered, never followed by shelves: "Explore Dresses" under
+    # "what size for the George shirt?" reads as the choices on offer, and none
+    # of them is one. Yes and no, or no chips at all.
+    if not offers_best and _questions_in(reply).strip():
+        try:
+            either = await either_chips(reply)
+        except Exception:  # noqa: BLE001 - chips are a nicety, never a reason to fail a reply
+            logger.warning("Could not read the products a question offers", exc_info=True)
+            either = []
+        return either or answer_chips(reply)
 
     if not offers_best:
         try:

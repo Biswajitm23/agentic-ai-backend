@@ -13,13 +13,17 @@ there is no conversation to check against, and every choice stands.
 import re
 from contextvars import ContextVar
 
-_words: ContextVar[str | None] = ContextVar("shopper_words", default=None)
+# (everything they have said, what they said this turn)
+_words: ContextVar[tuple[str, str] | None] = ContextVar("shopper_words", default=None)
 
 
-def set_words(messages: list[str]):
+def _plain(text: str) -> str:
+    return " ".join((text or "").lower().replace("’", "'").split())
+
+
+def set_words(messages: list[str], this_turn: str = ""):
     """Bind the shopper's messages for this turn. Returns a token for ``reset``."""
-    text = " ".join(" ".join(m.lower().replace("’", "'").split()) for m in messages if m)
-    return _words.set(text)
+    return _words.set((" ".join(_plain(m) for m in messages if m), _plain(this_turn)))
 
 
 def reset(token) -> None:
@@ -27,7 +31,21 @@ def reset(token) -> None:
 
 
 def current() -> str | None:
-    return _words.get()
+    bound = _words.get()
+    return bound[0] if bound else None
+
+
+_MORE_RE = re.compile(
+    r"\b(?:another|one more|more of|again|extra|second one|twice|a second)\b"
+    r"|\b\d+\s*(?:more|of them|of those|of these|x)\b"
+)
+
+
+def asks_for_more() -> bool:
+    """Whether this turn's message asks for more of something - "another one",
+    "one more", "again". Unbound, nothing is held back."""
+    bound = _words.get()
+    return True if bound is None else bool(_MORE_RE.search(bound[1]))
 
 
 def _found(pattern: str, text: str) -> bool:

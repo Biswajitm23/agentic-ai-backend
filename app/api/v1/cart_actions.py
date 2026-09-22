@@ -56,6 +56,12 @@ _CHECKOUT_RE = re.compile(
 )
 
 
+def wants_checkout(message: str) -> bool:
+    """Whether the shopper's own words ask to check out - "checkout", "buy now", "pay"."""
+    text = " ".join((message or "").lower().replace("’", "'").split())
+    return any(_CHECKOUT_RE.search(c) for c in _clauses(text))
+
+
 def _clauses(text: str) -> list[str]:
     """The parts of the message that are not questions, with negated verbs struck out."""
     parts = (p.strip() for p in re.split(r"[.?!\n]+", text))

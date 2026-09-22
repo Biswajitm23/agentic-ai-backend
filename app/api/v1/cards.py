@@ -134,9 +134,13 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
         if distinctive:
             if distinctive & said:
                 kept.append(item)
-        elif len(words & said) / len(words) >= _MENTION_RATIO:
-            # Nothing sets this title apart, so fall back to how much of it appears.
-            kept.append(item)
+        else:
+            # Nothing sets this title apart, so fall back to how much of it appears -
+            # counting what names this piece, not the kind of piece it is: "belt" in
+            # "here's our brown belt" was half of "Cream Boy's Belt" and drew it too.
+            core = (words - _KINDS) or words
+            if len(core & said) / len(core) >= _MENTION_RATIO:
+                kept.append(item)
     return kept
 
 

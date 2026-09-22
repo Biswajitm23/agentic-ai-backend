@@ -29,6 +29,26 @@ class ChatMessage(Base):
     created_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now())
 
 
+class ShownProducts(Base):
+    """The products a support chat last put in front of the shopper.
+
+    The transcript keeps only words, so by the time a shopper says "checkout"
+    with an empty bag, nothing records that the turn before showed them a brown
+    belt. This does: one row per session, replaced whenever a reply shows
+    products, so "checkout" can mean "the belt I was just shown". In the
+    database for the same reason as OrderChangeRequest - a redeploy must not
+    forget it mid-conversation.
+    """
+
+    __tablename__ = "chat_shown_products"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # [{product_id, variant_id, title}], in the order they were shown.
+    products: Mapped[list] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class OrderChangeRequest(Base):
     """A cancellation or address change a shopper has started but not confirmed.
 
