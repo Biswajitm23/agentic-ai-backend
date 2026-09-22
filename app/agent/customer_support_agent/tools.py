@@ -107,6 +107,33 @@ async def remove_from_cart(items: list[dict]) -> str:
 
 
 @tool
+async def edit_cart(items: list[dict]) -> str:
+    """Change something already in the shopper's bag - "reduce the dress to 1",
+    "one less belt", "add another one of those", "make it size 5Y instead",
+    "change it to blue". The storefront does the changing; this finds the exact
+    line in their bag and what it becomes.
+
+    items: [{"product": "<name as in their bag>", "color"/"size": only to pick
+      between two lines of it, "quantity": <how many they want afterwards>,
+      "change_by": -1 or 2 for "one less" / "two more", "new_color": "Blue",
+      "new_size": "5Y", "what": "quantity" | "size" | "color"}]
+      Give what they said and nothing more: a new size or colour only in their
+      words. "what" says which they want to change when they did not say to what.
+      "this"/"it" is the product they are viewing. To take a line out entirely,
+      use remove_from_cart.
+    done=true: confirm in one line what changed.
+    needs_choice: NOTHING changed - ask for just what it lists as missing:
+      which_one (from in_cart), quantity (it gives quantity_now), or a size or
+      colour (from its available options); then call again.
+    problems: not_in_cart, no_change, out_of_stock, no_variant_for_that_choice.
+    """
+    try:
+        return json.dumps(await cart_removal.cart_edits(items), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("edit_cart", exc)
+
+
+@tool
 async def go_to_checkout(page: str = "checkout") -> str:
     """Take the shopper to checkout - "checkout", "pay", "buy now", "place my order".
     page="cart" opens their bag instead. The storefront does the navigating."""
@@ -481,6 +508,7 @@ CUSTOMER_SUPPORT_TOOLS = [
     compare_products,
     add_to_cart,
     remove_from_cart,
+    edit_cart,
     go_to_checkout,
     browse_catalogue,
     build_outfit,

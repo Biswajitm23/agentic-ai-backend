@@ -139,6 +139,7 @@ query SupportCartProducts($query: String!, $first: Int!) {
           legacyResourceId
           title
           price
+          selectedOptions { name value }
           media(first: 1) { nodes { ... on MediaImage { image { url } } } }
         }
       }
@@ -284,6 +285,21 @@ def variant_image(variant: dict) -> str | None:
         if url:
             return url
     return None
+
+
+def variant_options(variant: dict | None) -> dict:
+    """Which colour and size a variant is, read from its own options.
+
+    Never split out of the title: "Brown / S / 60cm" is a colour and a size, and
+    the size itself holds a " / ". A product with no options gives Nones.
+    """
+    chosen = {o["name"]: o["value"] for o in (variant or {}).get("selectedOptions") or []
+              if o.get("name") and o.get("name") != "Title"}
+    return {
+        "color": chosen.get("Color") or chosen.get("Colour"),
+        "size": chosen.get("Size"),
+        "options": chosen,
+    }
 
 
 def product_url(node: dict, variant_id: str | None = None) -> str:
@@ -931,14 +947,17 @@ async def cart_cards(lines: list[dict], currency: str | None = None) -> list[dic
         node = products.get(handle)
         variant_id = str(line.get("variant_id") or "") or None
         image = None
+        variant = None
         if node:
             variant = next(
                 (v for v in node["variants"]["nodes"] if str(v.get("legacyResourceId")) == variant_id),
                 None,
             )
             image = (variant_image(variant) if variant else None) or product_image(node)
+        chosen = variant_options(variant)
         cards.append(
             {
+                **chosen,
                 "product_id": str(line.get("product_id")) if line.get("product_id") else (
                     node.get("legacyResourceId") if node else None
                 ),

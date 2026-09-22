@@ -18,8 +18,10 @@ CARD_TOOLS = {
     "suggest_pieces": "products",
     "compare_products": "products",
     "recommend_for_me": "products",
-    # What came out of the bag - and only that - when a turn removed something.
+    # What went into or came out of the bag - and only that - when a turn changed it.
+    "add_to_cart": "products",
     "remove_from_cart": "products",
+    "edit_cart": "products",
     "build_outfit": "outfit",
     "get_my_order_history": "orders",
     "check_order_status": "orders",
@@ -37,7 +39,15 @@ WHOLE_RESULT_TOOLS = {"browse_category"}
 
 # Tools whose products are never trimmed to the wording. A comparison is every
 # product in it, whichever of them the reply happens to name in full.
-FIXED_RESULT_TOOLS = {"compare_products", "remove_from_cart"}
+# Tools that change the bag: where their result keeps what changed, what kind
+# of change it is, and how the cards are headed.
+BAG_TOOLS = {
+    "add_to_cart": ("added", "added", "Added to your bag"),
+    "remove_from_cart": ("removed", "removed", "Removed from your bag"),
+    "edit_cart": ("changed", "edited", "Your bag was updated"),
+}
+
+FIXED_RESULT_TOOLS = {"compare_products", *BAG_TOOLS}
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -260,16 +270,20 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
             "cart_items": data.get("cart_items") or [],
         }
 
-    if tool_name == "remove_from_cart":
-        items = data.get("removed") or []
+    if tool_name in BAG_TOOLS:
+        key, change, heading = BAG_TOOLS[tool_name]
+        items = data.get(key) or []
         if not items:
-            return None                     # nothing came out: a question, or not in the bag
+            return None                     # nothing changed: a question, or not in the bag
         return {
-            "items": [card(i) | {"quantity": i.get("quantity"), "new_quantity": i.get("new_quantity")}
+            "items": [card(i) | {"quantity": i.get("quantity"), "change": i.get("change") or change,
+                                 "color": i.get("color"), "size": i.get("size"),
+                                 "options": i.get("options") or {}}
+                      | {k: i[k] for k in ("new_quantity", "quantity_before") if k in i}
                       for i in items],
             "currency": currency,
-            "heading": "Removed from your bag",
-            "layout": "removed",
+            "heading": heading,
+            "layout": change,
         }
 
     if tool_name == "compare_products":
@@ -323,8 +337,9 @@ class CardCollector:
         self.cart_waiting = False
         # ...and what it is waiting for: the options still to choose, per product.
         self.cart_choice: list[dict] = []
-        # A removal this turn: its cards are then the only products sent.
-        self.removed: dict | None = None
+        # What went into or came out of the bag this turn, one card set per call.
+        # When there is any, it is the only products sent.
+        self.bag_cards: list[dict] = []
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -346,7 +361,7 @@ class CardCollector:
                 action = None
             if isinstance(action, dict) and action.get("type"):
                 self.actions.append(action)
-        if tool_name in ("add_to_cart", "remove_from_cart"):
+        if tool_name in BAG_TOOLS:
             try:
                 result = json.loads(output or "{}")
                 self.cart_waiting = not result.get("done")
@@ -373,10 +388,23 @@ class CardCollector:
             self.products_fixed = tool_name in FIXED_RESULT_TOOLS
         if name == "outfit":
             self.outfits.append(cards)
-        if tool_name == "remove_from_cart":
-            self.removed = cards
+        if tool_name in BAG_TOOLS:
+            self.bag_cards.append(cards)
         setattr(self, name, cards)
         return name, cards
+
+    def settle_bag(self, actions: dict | None) -> None:
+        """Keep the added and removed cards only for the changes really being made.
+
+        The action decides - a question later in the same turn holds an add back -
+        and a card saying "added" beside a bag that did not change would be a lie.
+        """
+        if not self.bag_cards or self.products is None:
+            return
+        going = {str(line.get("variant_id"))
+                 for line in [*((actions or {}).get("items") or []), *((actions or {}).get("add_items") or [])]}
+        kept = [i for i in self.products.get("items") or [] if str(i.get("variant_id")) in going]
+        self.products = {**self.products, "items": kept} if kept else None
 
     def _presented_outfit(self, reply: str) -> None:
         """Send the look the reply presents, and what else it offered beside it.
@@ -429,10 +457,19 @@ class CardCollector:
         An outfit is exempt: it *is* the answer, priced and totalled, so it is
         sent whole, and the browse that fed it is dropped as noise.
         """
-        # Taking something out of the bag shows what came out, and nothing else:
-        # not the search that found it, not the rest of the bag.
-        if self.removed is not None:
-            self.products, self.products_fixed = self.removed, True
+        # Changing the bag shows what went in or came out, and nothing else: not
+        # the search that found it, not the rest of the bag.
+        if self.bag_cards:
+            items = [i for cards in self.bag_cards for i in cards["items"]]
+            changes = {i.get("change") for i in items}
+            single = len(changes) == 1
+            self.products = {
+                "items": items,
+                "currency": self.bag_cards[-1].get("currency"),
+                "heading": self.bag_cards[0]["heading"] if single else "Your bag was updated",
+                "layout": next(iter(changes)) if single else "bag_update",
+            }
+            self.products_fixed = True
             return
         # An outfit or an order listing IS the answer, so any browse that fed it
         # is dropped as noise - once it has given up any alternative the reply

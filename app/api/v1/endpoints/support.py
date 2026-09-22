@@ -313,17 +313,26 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                  cart_items[], alternatives?[]}   add to the bag; alternatives are the
                                                  other pieces the reply offered in
                                                  their place ("or the Plimsolls")
-      actions - {"action", items?, page?,        what to do with their bag, once per
-                 url?, absolute_url?}            turn at most. action is "add previous
+      actions - {"action", products[], items?,   what to do with their bag, once per
+                 page?, url?, absolute_url?}     turn at most. action is "add previous
                                                  products in cart" or "checkout" (both
                                                  with items), "checkout from existing"
-                                                 (the bag as it is), "open cart", or
-                                                 "remove from cart": items are then
-                                                 only the lines coming out, {variant_id,
-                                                 title, option, quantity, new_quantity},
-                                                 add_items any swap to add after - and
-                                                 the products event carries only the
-                                                 removed products.
+                                                 (the bag as it is), "open cart",
+                                                 "remove from cart" (items: only the
+                                                 lines coming out, {variant_id, title,
+                                                 option, quantity, new_quantity}) or
+                                                 "edit from cart" (items: every line
+                                                 that changes, {variant_id, title,
+                                                 option, color, size, quantity_before,
+                                                 new_quantity}). add_items: a new size
+                                                 or colour, or a swap, to add after.
+                                                 products: what the action acts on -
+                                                 added, removed, or the bag being
+                                                 checked out or opened - each with
+                                                 color, size, options, quantity, unit
+                                                 price, line_total and change
+                                                 ("added"/"removed"/"in_bag").
+                                                 The products event shows the same.
                                                  items: exactly these {variant_id,
                                                  quantity} to add first, in the size
                                                  and colour the shopper chose - never
@@ -440,23 +449,39 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         cards.limit_products(requested)
         if req.cart is not None and not req.cart.items:
             cards.drop_empty_checkout()
-        for name, payload in cards.as_dict().items():
-            yield _sse(name, payload)
-        # One instruction for the widget, and only ever one: add what it showed
-        # (or exactly these variants), then go to checkout or the bag. Repeated in
-        # `done` for a client that only reads the last event - carry it out once.
+        # One instruction for the widget, and only ever one: add these exact
+        # variants or take these lines out, then go to checkout or the bag.
+        # Repeated in `done` for a client that only reads the last event - carry
+        # it out once. Decided before the cards go, so the products event shows
+        # exactly what the bag gains or loses.
         actions = cart_actions.decide(
             req.message, cards.actions,
             bag_empty=req.cart is not None and not req.cart.items,
             waiting=cards.cart_waiting,
             reply=reply,
         )
+        cards.settle_bag(actions)
+        # Every action names the products it acts on - what went in or came out,
+        # or the bag being checked out - and the products event shows the same.
+        changed = ((cards.products or {}).get("items") or []) if cards.bag_cards else []
+        actions = cart_actions.with_products(actions, changed, (cart_payload or {}).get("items") or [])
+        shown = cart_actions.products_event(actions)
+        if shown:
+            cards.products, cards.products_fixed = shown, True
+        for name, payload in cards.as_dict().items():
+            yield _sse(name, payload)
         if actions:
             yield _sse("actions", actions)
 
         # Asked for a size or colour, the shopper taps the product's own options:
         # an exact value, so the next add_to_cart takes it without asking again.
         chips = suggestions.choice_chips(cards.cart_choice, reply) if cards.cart_waiting else []
+        if not chips:
+            try:
+                chips = await suggestions.asked_option_chips(reply)
+            except Exception:  # noqa: BLE001 - never fail a reply over a chip row
+                logger.warning("Could not build option chips for session %s", session_id, exc_info=True)
+                chips = []
         if not chips:
             try:
                 chips = await suggestions.for_turn(

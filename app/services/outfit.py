@@ -22,6 +22,7 @@ from app.services.shopify_storefront import (
     product_url,
     shop_info,
     variant_image,
+    variant_options,
 )
 
 logger = logging.getLogger(__name__)
@@ -255,6 +256,8 @@ def _cart_line(product: dict, variant: dict, quantity: int) -> dict:
         "product_id": product.get("legacyResourceId"),
         "title": product["title"],
         "option": None if variant.get("title") == "Default Title" else variant.get("title"),
+        # Which colour and size this is, so the widget never has to parse "option".
+        **variant_options(variant),
         "quantity": quantity,
         "unit_price": float(unit),
         "line_total": float(unit * quantity),

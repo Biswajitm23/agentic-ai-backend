@@ -21,6 +21,8 @@ CHECKOUT_FROM_EXISTING = "checkout from existing"
 OPEN_CART = "open cart"
 # Also only the agent's doing: remove_from_cart found the exact lines in the bag.
 REMOVE_FROM_CART = "remove from cart"
+# ...and edit_cart: a line's new quantity, or the same product in another size or colour.
+EDIT_FROM_CART = "edit from cart"
 
 # Where each word leaves the shopper; adding alone keeps them on the page.
 _PAGE = {CHECKOUT: "checkout", CHECKOUT_FROM_EXISTING: "checkout", OPEN_CART: "cart"}
@@ -76,7 +78,7 @@ def cart_action(
     bag_empty: bool = False,
     waiting: bool = False,
 ) -> str | None:
-    """REMOVE_FROM_CART, ADD_PREVIOUS, CHECKOUT, CHECKOUT_FROM_EXISTING, OPEN_CART, or None.
+    """EDIT_FROM_CART, REMOVE_FROM_CART, ADD_PREVIOUS, CHECKOUT, CHECKOUT_FROM_EXISTING, OPEN_CART, or None.
 
     Only what the shopper chose goes in the bag, so nothing is added here that
     the agent's add_to_cart did not add, in the exact variants it resolved: the
@@ -93,7 +95,10 @@ def cart_action(
     text = " ".join((message or "").lower().replace("’", "'").split())
     clauses = _clauses(text)
     issued = issued or []
-    # Taking something out leads: it carries the page to go to next, if any.
+    # Changing lines already in the bag leads: an edit carries any removal and
+    # any addition made beside it, and the page to go to next, if any.
+    if any(a.get("type") == "edit_cart" and (a.get("items") or a.get("add_items")) for a in issued):
+        return EDIT_FROM_CART
     if any(a.get("type") == "remove_from_cart" and a.get("items") for a in issued):
         return REMOVE_FROM_CART
     added = any(a.get("type") == "add_to_cart" and a.get("items") for a in issued)
@@ -127,6 +132,8 @@ def payload(word: str | None, issued: list[dict] | None = None) -> dict | None:
         return None
     if word == REMOVE_FROM_CART:
         return _removal(issued or [])
+    if word == EDIT_FROM_CART:
+        return _edit(issued or [])
     event: dict = {"action": word}
     if word != CHECKOUT_FROM_EXISTING:
         items = [line for a in issued or [] if a.get("type") == "add_to_cart"
@@ -164,6 +171,38 @@ def _removal(issued: list[dict]) -> dict:
     return event
 
 
+def _edit(issued: list[dict]) -> dict:
+    """The edit event: every line of the bag that changes, and anything added beside it.
+
+    items     - {variant_id, title, option, color, size, quantity_before,
+                new_quantity}: set that line to new_quantity (0 = the line goes).
+                A removal made in the same turn is one of these, at 0.
+    add_items - {variant_id, quantity} to add after: the new size or colour of
+                a line that changed, or anything add_to_cart put in beside it.
+    url       - where to go afterwards, when they also asked for checkout or the bag.
+    """
+    items = [line for a in issued if a.get("type") == "edit_cart" for line in a.get("items") or []]
+    for a in issued:
+        if a.get("type") == "remove_from_cart":
+            for line in a.get("items") or []:
+                items.append({"variant_id": line["variant_id"], "title": line.get("title"),
+                              "option": line.get("option"), "color": line.get("color"),
+                              "size": line.get("size"),
+                              "quantity_before": line["quantity"] + line["new_quantity"],
+                              "new_quantity": line["new_quantity"]})
+    event: dict = {"action": EDIT_FROM_CART, "items": items}
+    adding = [line for a in issued if a.get("type") in ("edit_cart", "add_to_cart")
+              for line in a.get("add_items" if a.get("type") == "edit_cart" else "items") or []]
+    if adding:
+        event["add_items"] = adding
+    page = next((a.get("page") for a in issued if a.get("type") == "redirect"), None)
+    if page in ("checkout", "cart"):
+        event["page"] = page
+        event["url"] = f"/{page}"
+        event["absolute_url"] = f"https://{store_domain()}/{page}"
+    return event
+
+
 def decide(
     message: str,
     issued: list[dict] | None = None,
@@ -182,10 +221,91 @@ def decide(
     if _asks_to_choose(reply):
         if word == CHECKOUT:
             word = ADD_PREVIOUS
-        elif word not in (ADD_PREVIOUS, REMOVE_FROM_CART):
+        elif word not in (ADD_PREVIOUS, REMOVE_FROM_CART, EDIT_FROM_CART):
             word = None
     event = payload(word, issued)
     if event and _asks_to_choose(reply):
         for key in ("page", "url", "absolute_url"):
             event.pop(key, None)
     return event
+
+
+# ── The products each action acts on ───────────────────────────────────────
+# An action is always about products, so it names them: the widget should never
+# have to work out from elsewhere which ones "add", "checkout" or "remove" meant.
+
+_SHOWN_AS = {
+    ADD_PREVIOUS: ("Added to your bag", "added"),
+    CHECKOUT: ("Checking out", "checkout"),
+    CHECKOUT_FROM_EXISTING: ("Checking out", "checkout"),
+    OPEN_CART: ("Your bag", "cart"),
+    REMOVE_FROM_CART: ("Removed from your bag", "removed"),
+    EDIT_FROM_CART: ("Your bag was updated", "edited"),
+}
+# color and size are the variant's own: which one the action means, never a guess.
+_CARD_FIELDS = ("product_id", "variant_id", "title", "option", "color", "size", "image", "url", "currency")
+
+
+def _product(card: dict, change: str, *, price_is_line: bool = False) -> dict:
+    """One product as every action carries it: price per unit, with the line's total."""
+    quantity = int(card.get("quantity") or 1)
+    price = card.get("price")
+    if price is not None and price_is_line:
+        price = round(price / quantity, 2)          # the bag reports a line's total
+    product = {k: card.get(k) for k in _CARD_FIELDS}
+    product["options"] = card.get("options") or {}
+    product.update(quantity=quantity, price=price,
+                   line_total=round(price * quantity, 2) if price is not None else None,
+                   change=change)
+    for key in ("quantity_before", "new_quantity"):
+        if key in card:
+            product[key] = card[key]
+    return product
+
+
+def _checking_out(bag: list[dict], added: list[dict]) -> list[dict]:
+    """Everything that goes to checkout: the bag, with what was just added folded in."""
+    lines: dict[str, dict] = {}
+    for i, line in enumerate(bag):
+        lines[str(line.get("variant_id") or f"line-{i}")] = _product(line, "in_bag", price_is_line=True)
+    for card in added:
+        key = str(card.get("variant_id"))
+        if key in lines:
+            # Already in the bag: one card, with the new total.
+            line = lines[key]
+            line["quantity"] += int(card.get("quantity") or 1)
+            line["line_total"] = round(line["price"] * line["quantity"], 2) if line["price"] is not None else None
+            line["change"] = "added"
+        else:
+            lines[key] = _product(card, "added")
+    return list(lines.values())
+
+
+def with_products(event: dict | None, changed: list[dict], bag: list[dict]) -> dict | None:
+    """The event with the products it acts on under ``products``.
+
+    changed - the cards of what this turn added or removed.
+    bag     - the shopper's cart lines as the widget sent them, with imagery.
+    """
+    if not event:
+        return event
+    word = event["action"]
+    if word in (ADD_PREVIOUS, REMOVE_FROM_CART, EDIT_FROM_CART):
+        products = [_product(c, c.get("change") or "added") for c in changed]
+    elif word == CHECKOUT:
+        products = _checking_out(bag, [c for c in changed if c.get("change") == "added"])
+    else:                                            # the bag as it stands
+        products = [_product(line, "in_bag", price_is_line=True) for line in bag]
+    return {**event, "products": products}
+
+
+def products_event(event: dict | None) -> dict | None:
+    """The products SSE payload for an action turn: the same products the action names."""
+    if not event or not event.get("products"):
+        return None
+    heading, layout = _SHOWN_AS.get(event["action"], ("Your bag", "cart"))
+    if event.get("add_items") and event["action"] != EDIT_FROM_CART:
+        heading, layout = "Your bag was updated", "bag_update"
+    products = event["products"]
+    return {"items": products, "currency": next((p["currency"] for p in products if p.get("currency")), None),
+            "heading": heading, "layout": layout}

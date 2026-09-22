@@ -109,13 +109,22 @@ def choice_chips(needs_choice: list[dict], reply: str = "") -> list[dict]:
             return [{"label": t, "prompt": t, "kind": "product"}
                     for t in entry.get("which_product") or []][:CHOICE_LIMIT]
         if "which_one" in missing:
-            # Two lines of the bag answer to the name: which comes out?
+            # Two lines of the bag answer to the name: which one is meant?
+            verb = "Remove the" if entry.get("doing") == "remove" else "The"
             chips = []
             for line in entry.get("in_cart") or []:
                 title, option = line.get("title") or "", line.get("option") or ""
                 named = f"{title} ({option})" if option and option not in title else title
-                chips.append({"label": option or title, "prompt": f"Remove the {named}", "kind": "cart_line"})
+                chips.append({"label": option or title, "prompt": f"{verb} {named}", "kind": "cart_line"})
             return chips[:CHOICE_LIMIT]
+        if "quantity" in missing:
+            # "Change the quantity" with no number: the counts around what is there now.
+            now = int(entry.get("quantity_now") or 1)
+            title, option = entry.get("title") or "", entry.get("option") or ""
+            named = f"{title} ({option})" if option and option not in title else title
+            counts = [n for n in range(1, max(now + 3, 5)) if n != now][:6]
+            return [{"label": str(n), "prompt": f"Make it {n} of the {named}", "kind": "quantity"}
+                    for n in counts]
         kinds = [k for k in ("color", "size") if k in missing]
         if not kinds:
             continue
@@ -123,10 +132,52 @@ def choice_chips(needs_choice: list[dict], reply: str = "") -> list[dict]:
         if len(kinds) == 2 and "size" in asked and not re.search(r"colou?r", asked):
             kind = "size"
         values = entry.get("available_colors" if kind == "color" else "available_sizes") or []
+        # Changing a line: never offer back the size or colour it already is.
+        values = [v for v in values if v != (entry.get("now") or {}).get(kind)]
         title = entry.get("title") or ""
         return [{"label": v, "prompt": f"{v} for the {title}" if title else v,
                  "kind": "colour" if kind == "color" else "size"} for v in values][:CHOICE_LIMIT]
     return []
+
+
+_SIZE_WORD_RE = re.compile(r"\bsizes?\b", re.I)
+_COLOUR_WORD_RE = re.compile(r"\bcolou?rs?\b", re.I)
+
+
+async def asked_option_chips(reply: str) -> list[dict]:
+    """A size or colour question the agent asked itself, answered with that product's options.
+
+    "What size for the Cream Boy's Belt?" came with Explore Dresses under it: the
+    agent asked on its own rather than through add_to_cart, so no options came
+    back with the question. The product must be named in the question itself -
+    nothing is guessed - and must actually offer more than one of what was asked.
+    """
+    asked = _questions_in(reply).replace("’", "'")
+    size_at = _SIZE_WORD_RE.search(asked)
+    colour_at = _COLOUR_WORD_RE.search(asked)
+    if not (size_at or colour_at):
+        return []
+    tree = await shopify_storefront.collection_tree()
+    lowered = asked.lower()
+    named = [title for title in tree["ids"] if title in lowered]
+    if not named:
+        return []
+    product_id = tree["ids"][max(named, key=len)]
+    title, handle = tree["titles"][product_id], tree["handles"][product_id]
+
+    from app.services import outfit
+
+    product = next(iter(await outfit._active_products([handle])), None)
+    if product is None:
+        return []
+    options = outfit._options_of(product)
+    # Whichever the question asks about first.
+    by_size = bool(size_at) and (not colour_at or size_at.start() < colour_at.start())
+    values = options.get("Size") if by_size else (options.get("Color") or options.get("Colour"))
+    if not values or len(values) < 2:
+        return []
+    kind = "size" if by_size else "colour"
+    return [{"label": v, "prompt": f"{v} for the {title}", "kind": kind} for v in values][:CHOICE_LIMIT]
 
 
 def question_chips(reply: str, colours: list[str] | None = None) -> list[dict]:
