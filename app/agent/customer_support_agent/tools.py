@@ -67,12 +67,16 @@ async def add_to_cart(items: list[dict]) -> str:
     finds the exact variant and tells it which.
 
     items: [{"product": "<name or handle>", "color": "Pink", "size": "5Y", "quantity": 1}]
-      "this"/"it" is the product they are viewing. For variants a tool already
-      gave you - build_outfit's cart_items - send [{"variant_id": "...", "quantity": 1}].
-      Leave out color or size only where the product has none.
+      "this"/"it" is the product they are viewing. Only the color and size the
+      shopper said themselves - it checks their words, and anything else comes
+      back unconfirmed. build_outfit's cart_items ([{"variant_id", "quantity"}])
+      are checked the same way.
     done=true: it is going in - confirm in one line what was added.
-    needs_choice: nothing was added; ask for exactly what it lists as missing,
-      from its available options, then call again. Never choose a size for them.
+    needs_choice: NOTHING was added, not even the pieces in not_added_yet - never
+      say any of it is in the bag. Ask for exactly what it lists as missing,
+      from its available options, then call again. unconfirmed is a value you
+      chose, not them: offer it if you like, but they must say it. The shopper
+      is shown the options as buttons.
     problems: out of stock, no such option, or not found - say which.
     """
     try:

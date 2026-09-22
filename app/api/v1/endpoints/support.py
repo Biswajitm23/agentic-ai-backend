@@ -30,7 +30,7 @@ from app.agent.customer_support_agent.shopper_context import (
 from app.api.v1 import cart_actions
 from app.api.v1.cards import CardCollector
 from app.services import shopify_storefront, shopper_identity as identity
-from app.services import store_profile, suggestions
+from app.services import shopper_words, store_profile, suggestions
 from app.services.shopify_client import ShopifyError
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
@@ -315,11 +315,13 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  their place ("or the Plimsolls")
       actions - {"action", items?, page?,        what to do with their bag, once per
                  url?, absolute_url?}            turn at most. action is "add previous
-                                                 products in cart", "checkout" (with
-                                                 the products shown), "checkout from
-                                                 existing" (only what is in the bag)
-                                                 or "open cart". items: exactly these
-                                                 {variant_id, quantity} to add first.
+                                                 products in cart" or "checkout" (both
+                                                 with items), "checkout from existing"
+                                                 (the bag as it is) or "open cart".
+                                                 items: exactly these {variant_id,
+                                                 quantity} to add first, in the size
+                                                 and colour the shopper chose - never
+                                                 add the shown products on your own.
                                                  url: where to go afterwards
       done    - {"session_id", "reply",          the finished reply, repeating
                  products?, outfit?,             whatever cards were produced and
@@ -394,6 +396,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         cards = CardCollector()
         token = identity.set_current(shopper)
         session_token = identity.set_session(session_id)
+        # What the shopper has said, so the bag takes only a size and colour
+        # they chose - never one the agent filled in.
+        words_token = shopper_words.set_words([c for role, c in history if role == "user"] + [req.message])
         try:
             async for event in CUSTOMER_SUPPORT_AGENT.stream(with_context(req.message, briefing), history):
                 if event["type"] == "token":
@@ -414,6 +419,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         finally:
             identity.reset(token)
             identity.reset_session(session_token)
+            shopper_words.reset(words_token)
 
         await _save_turn(session_id, req.message, reply)
         # Repeated in `done` so a client that only reads the final event still
@@ -431,18 +437,23 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             req.message, cards.actions,
             bag_empty=req.cart is not None and not req.cart.items,
             waiting=cards.cart_waiting,
+            reply=reply,
         )
         actions = cart_actions.payload(cart_action, cards.actions)
         if actions:
             yield _sse("actions", actions)
 
-        try:
-            chips = await suggestions.for_turn(
-                cards.category, reply=reply, shown_products=cards.shown_products()
-            )
-        except Exception:  # noqa: BLE001 - never fail a reply over a chip row
-            logger.warning("Could not build suggestions for session %s", session_id, exc_info=True)
-            chips = []
+        # Asked for a size or colour, the shopper taps the product's own options:
+        # an exact value, so the next add_to_cart takes it without asking again.
+        chips = suggestions.choice_chips(cards.cart_choice, reply) if cards.cart_waiting else []
+        if not chips:
+            try:
+                chips = await suggestions.for_turn(
+                    cards.category, reply=reply, shown_products=cards.shown_products()
+                )
+            except Exception:  # noqa: BLE001 - never fail a reply over a chip row
+                logger.warning("Could not build suggestions for session %s", session_id, exc_info=True)
+                chips = []
         if chips:
             yield _sse("suggestions", {"suggestions": chips})
 

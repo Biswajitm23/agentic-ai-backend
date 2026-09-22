@@ -307,6 +307,8 @@ class CardCollector:
         # The last add_to_cart put nothing in - it is asking for a size, colour or
         # which product - so the widget must not act on the bag this turn.
         self.cart_waiting = False
+        # ...and what it is waiting for: the options still to choose, per product.
+        self.cart_choice: list[dict] = []
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -330,9 +332,11 @@ class CardCollector:
                 self.actions.append(action)
         if tool_name == "add_to_cart":
             try:
-                self.cart_waiting = not json.loads(output or "{}").get("done")
+                result = json.loads(output or "{}")
+                self.cart_waiting = not result.get("done")
+                self.cart_choice = result.get("needs_choice") or []
             except (TypeError, ValueError, AttributeError):
-                self.cart_waiting = True
+                self.cart_waiting, self.cart_choice = True, []
         if tool_name == "browse_category" and output:
             try:
                 found = json.loads(output)

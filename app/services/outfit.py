@@ -15,6 +15,7 @@ import json
 import logging
 from decimal import Decimal, InvalidOperation
 
+from app.services import shopper_words
 from app.services.shopify_client import ShopifyError, graphql
 from app.services.shopify_storefront import (
     product_image,
@@ -196,6 +197,7 @@ query CartVariant($id: ID!) {
     title
     price
     availableForSale
+    selectedOptions { name value }
     media(first: 1) { nodes { ... on MediaImage { image { url } } } }
     product {
       legacyResourceId
@@ -203,6 +205,7 @@ query CartVariant($id: ID!) {
       handle
       status
       onlineStoreUrl
+      options { name values }
       featuredMedia { ... on MediaImage { image { url } } }
     }
   }
@@ -210,6 +213,38 @@ query CartVariant($id: ID!) {
 """
 
 MAX_CART_QUANTITY = 10
+
+
+def _unchosen(colours: list[str], sizes: list[str], colour: str | None,
+              size: str | None) -> tuple[list[str], dict]:
+    """The options still to ask about, and any the agent filled in by itself.
+
+    Only a real choice counts - one colour on offer is no question. A value the
+    shopper never said is sent back as unconfirmed: the agent may offer it
+    ("the look had 10Y - is that right?") but may not add it.
+    """
+    words = shopper_words.current()
+    missing: list[str] = []
+    unconfirmed: dict = {}
+    for kind, chosen, offered, said in (("color", colour, colours, shopper_words.said_colour),
+                                        ("size", size, sizes, shopper_words.said_size)):
+        if len(offered) <= 1:
+            continue
+        if not chosen:
+            missing.append(kind)
+        elif words is not None and not said(str(chosen), words):
+            missing.append(kind)
+            unconfirmed[kind] = chosen
+    return missing, unconfirmed
+
+
+def _choice_needed(title: str, missing: list[str], unconfirmed: dict,
+                   colours: list[str], sizes: list[str]) -> dict:
+    entry = {"title": title, "missing": missing,
+             "available_colors": colours, "available_sizes": sizes}
+    if unconfirmed:
+        entry["unconfirmed"] = unconfirmed
+    return entry
 
 
 def _cart_line(product: dict, variant: dict, quantity: int) -> dict:
@@ -261,6 +296,15 @@ async def cart_additions(items: list[dict]) -> dict:
             product = (node or {}).get("product") or {}
             if not node or product.get("status") != "ACTIVE":
                 problems.append({"variant_id": variant_id, "reason": "not_found_or_not_for_sale"})
+                continue
+            # A variant from a look the agent priced still has to be the size
+            # and colour the shopper wants.
+            offered = _options_of(product)
+            colours = offered.get("Color") or offered.get("Colour") or []
+            sizes = offered.get("Size") or []
+            missing, unconfirmed = _unchosen(colours, sizes, _colour_of(node), _option_value(node, "Size"))
+            if missing:
+                needs_choice.append(_choice_needed(product["title"], missing, unconfirmed, colours, sizes))
             elif not node["availableForSale"]:
                 problems.append({"title": product["title"], "option": node["title"], "reason": "out_of_stock"})
             else:
@@ -301,15 +345,9 @@ async def cart_additions(items: list[dict]) -> dict:
         sizes = options.get("Size") or []
         colour = item.get("color") or item.get("colour") or (colours[0] if len(colours) == 1 else None)
         size = item.get("size") or (sizes[0] if len(sizes) == 1 else None)
-        missing = [name for name, chosen, offered in (("color", colour, colours), ("size", size, sizes))
-                   if not chosen and len(offered) > 1]
+        missing, unconfirmed = _unchosen(colours, sizes, colour, size)
         if missing:
-            needs_choice.append({
-                "title": product["title"],
-                "missing": missing,
-                "available_colors": colours,
-                "available_sizes": sizes,
-            })
+            needs_choice.append(_choice_needed(product["title"], missing, unconfirmed, colours, sizes))
             continue
 
         variant = _match_variant(product, colour, size)
@@ -325,10 +363,15 @@ async def cart_additions(items: list[dict]) -> dict:
     result: dict = {
         "done": done,
         "currency": currency,
-        "lines": lines,
+        # Named for what they are: given "lines" beside a question about the
+        # shoes, the agent told the shopper the dress was already in their bag.
+        ("added" if done else "not_added_yet"): lines,
         "needs_choice": needs_choice,
         "problems": problems,
     }
+    if not done and lines:
+        result["note"] = ("Nothing is in the bag yet - these go in together with the rest, "
+                          "once every choice is made.")
     if done:
         result["action"] = {
             "type": "add_to_cart",

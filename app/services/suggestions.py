@@ -92,6 +92,35 @@ def _questions_in(reply: str) -> str:
     return " ".join(_QUESTION_RE.findall(reply or ""))
 
 
+CHOICE_LIMIT = 10     # a size run is longer than a row of topic chips
+
+
+def choice_chips(needs_choice: list[dict], reply: str = "") -> list[dict]:
+    """The exact options add_to_cart is waiting on, for the first product that needs one.
+
+    Tapped, a chip says "5Y for the Catherine Gingham dress": the shopper's own
+    choice, in the product's own spelling, so it goes in without asking again.
+    The option the reply asked about comes first when it asked about one.
+    """
+    asked = _questions_in(reply).lower()
+    for entry in needs_choice or []:
+        missing = entry.get("missing") or []
+        if "product" in missing:
+            return [{"label": t, "prompt": t, "kind": "product"}
+                    for t in entry.get("which_product") or []][:CHOICE_LIMIT]
+        kinds = [k for k in ("color", "size") if k in missing]
+        if not kinds:
+            continue
+        kind = kinds[0]
+        if len(kinds) == 2 and "size" in asked and not re.search(r"colou?r", asked):
+            kind = "size"
+        values = entry.get("available_colors" if kind == "color" else "available_sizes") or []
+        title = entry.get("title") or ""
+        return [{"label": v, "prompt": f"{v} for the {title}" if title else v,
+                 "kind": "colour" if kind == "color" else "size"} for v in values][:CHOICE_LIMIT]
+    return []
+
+
 def question_chips(reply: str, colours: list[str] | None = None) -> list[dict]:
     """Chips answering whatever the reply asked, or [] if it asked nothing."""
     if not reply or not _asks_a_question(reply):

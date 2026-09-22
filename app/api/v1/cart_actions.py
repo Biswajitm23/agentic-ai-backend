@@ -1,15 +1,13 @@
 """What the shopper wants done with their bag, as one word the widget acts on.
 
-The shopper asked to add what they were shown, to check out with it, or to check
-out with only what is already in the bag. The widget holds the cards it drew, so
-it knows which products "these" are. When the agent itself called add_to_cart or
-go_to_checkout, payload() adds its exact instructions - these variant ids, this
-page - to the same one ``actions`` event.
+Only what the shopper chose goes in the bag. The widget never adds the products
+it showed on its own - it could only guess a size - so every addition is the
+agent's add_to_cart, in the exact variants it resolved once the shopper had
+named the size and colour. payload() puts those variant ids, and the page to go
+to, in the same one ``actions`` event.
 
-Read off the shopper's own words first, the way the requested count is: the model
-is not relied on to report an intent it may not act on. What the agent did this
-turn fills the gap for the replies that name no action - "yes please" to "shall I
-add the look to your bag?".
+Checking out is read off the shopper's own words as well, the way the requested
+count is: the model is not relied on to report an intent it may not act on.
 """
 
 import re
@@ -25,7 +23,6 @@ OPEN_CART = "open cart"
 # Where each word leaves the shopper; adding alone keeps them on the page.
 _PAGE = {CHECKOUT: "checkout", CHECKOUT_FROM_EXISTING: "checkout", OPEN_CART: "cart"}
 
-_CART = r"(?:cart|bag|basket|trolley)"
 _CHECKOUT_WORD = r"(?:check-?\s?out|pay(?:ment)?)"
 
 # A clause that asks about the cart rather than asking us to act on it - "how do
@@ -54,39 +51,20 @@ _CHECKOUT_RE = re.compile(
     rf"|\btake\s+me\s+to\s+(?:the\s+)?{_CHECKOUT_WORD}\b"
 )
 
-_ADD_RE = re.compile(
-    # "add all these products in my cart", "put them in my bag", "add to cart"
-    rf"\b(?:add|put|pop|throw)\b(?:\s+[\w'-]+){{0,6}}?\s+(?:in|into|to|onto)\s+"
-    rf"(?:my\s+|the\s+|our\s+)?(?:shopping\s+)?{_CART}\b"
-    # "add them", "add these", "add the look"
-    r"|\badd\s+(?:it|them|these|those|this|that|all|everything|both|the\s+(?:look|outfit|lot|set))\b"
-)
-
-# They do not want what was shown - checked across the whole message, since "Just
-# checkout. I don't need the above." puts it in a sentence of its own.
-_REJECT_RE = re.compile(
-    r"\b(?:don't|dont|do\s+not|never)\s+(?:need|want|like)\b(?!\s+to\b)"
-    r"|\b(?:don't|dont|do\s+not|never)\s+(?:add|include|put)\b"
-    r"|\bno\s+need\b"
-    r"|\bwithout\s+(?:adding|these|those|them|the\s+(?:above|ones|products?|items?|suggest\w*|recommend\w*))\b"
-    r"|\b(?:skip|forget|leave|ignore|drop)\s+(?:about\s+)?(?:these|those|them|it|that|this"
-    r"|the\s+(?:above|rest|ones|products?|items?|suggest\w*|recommend\w*|outfit|look))\b"
-    r"|\b(?:not|none\s+of)\s+(?:these|those|them|the\s+(?:above|ones|products?|items?))\b"
-    # Only what is already there: "what's in my cart", "my existing bag", "I already added them"
-    rf"|\bwhat(?:ever)?(?:'s|s|\s+is|\s+i\s+(?:already\s+)?(?:have|had|got))\s+(?:already\s+)?in\s+(?:my|the)\s+{_CART}\b"
-    r"|\bwith\s+what(?:ever)?\s+i\s+(?:already\s+)?(?:have|had|got)\b"
-    rf"|\b(?:existing|current)\s+(?:{_CART}|items?|products?)\b"
-    rf"|\balready\s+(?:have\s+)?in\s+(?:my|the)\s+{_CART}\b"
-    r"|\balready\s+(?:added|put|have)\b"
-    # "just checkout" - nothing else, the shown products included
-    rf"|\b(?:just|only|straight|directly)\s+(?:(?:go|take\s+me|proceed)\s+)?(?:to\s+)?(?:the\s+)?{_CHECKOUT_WORD}\b"
-)
-
 
 def _clauses(text: str) -> list[str]:
     """The parts of the message that are not questions, with negated verbs struck out."""
     parts = (p.strip() for p in re.split(r"[.?!\n]+", text))
     return [_NEGATED_RE.sub(" ", p) for p in parts if p and not _QUESTION_RE.search(p)]
+
+
+# The reply asks them to choose something - a size, a colour, which one.
+_CHOOSING_RE = re.compile(r"\b(?:sizes?|colou?rs?|which\s+(?:one|of)|shade)\b", re.I)
+_ASKED_RE = re.compile(r"[^.!?\n]*\?")
+
+
+def _asks_to_choose(reply: str) -> bool:
+    return any(_CHOOSING_RE.search(q) for q in _ASKED_RE.findall(reply or ""))
 
 
 def cart_action(
@@ -95,31 +73,38 @@ def cart_action(
     *,
     bag_empty: bool = False,
     waiting: bool = False,
+    reply: str = "",
 ) -> str | None:
     """ADD_PREVIOUS, CHECKOUT, CHECKOUT_FROM_EXISTING, OPEN_CART, or None.
+
+    Only what the shopper chose goes in the bag, so nothing is added here that
+    the agent's add_to_cart did not add, in the exact variants it resolved: the
+    widget adding the products it showed would pick a size nobody asked for.
 
     issued: the ``action`` dicts the agent's own tools produced this turn. Checking
     out wins over adding - "add these and checkout" is a checkout with them in it.
     bag_empty: the widget sent a cart with nothing in it.
-    waiting: the agent's add_to_cart put nothing in and is asking a question, so
-    leaving the page now would walk out on it.
+    waiting: the agent's add_to_cart put nothing in and is asking a question.
+    reply: the agent's answer - one asking them to pick a size or colour is no
+    moment to leave the page either.
     """
-    if waiting:
+    if waiting or _asks_to_choose(reply):
         return None
     text = " ".join((message or "").lower().replace("’", "'").split())
     clauses = _clauses(text)
     issued = issued or []
-    adding = any(_ADD_RE.search(c) for c in clauses) or any(a.get("type") == "add_to_cart" for a in issued)
+    added = any(a.get("type") == "add_to_cart" and a.get("items") for a in issued)
 
     checkout = any(_CHECKOUT_RE.search(c) for c in clauses) or any(
         a.get("type") == "redirect" and a.get("page") == "checkout" for a in issued
     )
     if checkout:
-        # An empty bag with nothing going into it is an empty checkout page.
-        if bag_empty and (not adding or _REJECT_RE.search(text)):
-            return None
-        return CHECKOUT_FROM_EXISTING if _REJECT_RE.search(text) else CHECKOUT
-    if adding:
+        if added:
+            return CHECKOUT
+        # Nothing went in this turn, so the bag goes as it is - and an empty bag
+        # is an empty checkout page.
+        return None if bag_empty else CHECKOUT_FROM_EXISTING
+    if added:
         return ADD_PREVIOUS
     if any(a.get("type") == "redirect" and a.get("page") == "cart" for a in issued):
         return OPEN_CART
@@ -130,8 +115,9 @@ def payload(word: str | None, issued: list[dict] | None = None) -> dict | None:
     """The ``actions`` event: the word, with the exact instructions behind it.
 
     items - the variants the agent put in the bag this turn, as {variant_id,
-            quantity}: add exactly these first. Absent, "add previous products"
-            and "checkout" mean the products the widget showed.
+            quantity}, in the size and colour the shopper chose: add exactly
+            these first. Always there for "add previous products in cart" and
+            "checkout"; "checkout from existing" is the bag as it stands.
     url   - where to send the shopper once the bag is right; absent, stay put.
     """
     if not word:
