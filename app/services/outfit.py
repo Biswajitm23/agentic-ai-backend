@@ -636,20 +636,30 @@ def _parse_items(raw: str | list | dict) -> list[dict]:
 
 
 def _match_variant(product: dict, want_colour: str | None, want_size: str | None) -> dict | None:
-    """Pick the variant matching the requested colour and size, preferring one in stock."""
+    """Pick the variant matching the requested colour and size, preferring one in stock.
 
-    def matches(variant: dict) -> bool:
-        if want_colour:
-            value = _colour_of(variant)
-            if not value or value.casefold() != want_colour.casefold():
-                return False
-        if want_size:
-            value = _option_value(variant, "Size")
-            if not value or value.casefold() != want_size.casefold():
-                return False
-        return True
+    The exact value first. Failing that, the way a shopper writes it - "XL" for
+    "XL / 80cm", "35" for "3UK/3US/35EU" - but only when that points at one value.
+    """
+    variants = product["variants"]["nodes"]
 
-    candidates = [v for v in product["variants"]["nodes"] if matches(v)]
+    def pick(wanted: str | None, read, said) -> set[str] | None:
+        if not wanted:
+            return None
+        values = {read(v) for v in variants if read(v)}
+        exact = {v for v in values if v.casefold() == wanted.casefold()}
+        if exact:
+            return exact
+        loose = {v for v in values if said(v, wanted.lower())}
+        return loose if len(loose) == 1 else set()
+
+    colours = pick(want_colour, _colour_of, shopper_words.said_colour)
+    sizes = pick(want_size, lambda v: _option_value(v, "Size"), shopper_words.said_size)
+    candidates = [
+        v for v in variants
+        if (colours is None or _colour_of(v) in colours)
+        and (sizes is None or _option_value(v, "Size") in sizes)
+    ]
     if not candidates:
         return None
     return next((v for v in candidates if v["availableForSale"]), candidates[0])

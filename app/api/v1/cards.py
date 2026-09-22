@@ -18,6 +18,8 @@ CARD_TOOLS = {
     "suggest_pieces": "products",
     "compare_products": "products",
     "recommend_for_me": "products",
+    # What came out of the bag - and only that - when a turn removed something.
+    "remove_from_cart": "products",
     "build_outfit": "outfit",
     "get_my_order_history": "orders",
     "check_order_status": "orders",
@@ -35,7 +37,7 @@ WHOLE_RESULT_TOOLS = {"browse_category"}
 
 # Tools whose products are never trimmed to the wording. A comparison is every
 # product in it, whichever of them the reply happens to name in full.
-FIXED_RESULT_TOOLS = {"compare_products"}
+FIXED_RESULT_TOOLS = {"compare_products", "remove_from_cart"}
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -258,6 +260,18 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
             "cart_items": data.get("cart_items") or [],
         }
 
+    if tool_name == "remove_from_cart":
+        items = data.get("removed") or []
+        if not items:
+            return None                     # nothing came out: a question, or not in the bag
+        return {
+            "items": [card(i) | {"quantity": i.get("quantity"), "new_quantity": i.get("new_quantity")}
+                      for i in items],
+            "currency": currency,
+            "heading": "Removed from your bag",
+            "layout": "removed",
+        }
+
     if tool_name == "compare_products":
         items = data.get("products") or []
         if len(items) < 2:
@@ -309,6 +323,8 @@ class CardCollector:
         self.cart_waiting = False
         # ...and what it is waiting for: the options still to choose, per product.
         self.cart_choice: list[dict] = []
+        # A removal this turn: its cards are then the only products sent.
+        self.removed: dict | None = None
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -330,7 +346,7 @@ class CardCollector:
                 action = None
             if isinstance(action, dict) and action.get("type"):
                 self.actions.append(action)
-        if tool_name == "add_to_cart":
+        if tool_name in ("add_to_cart", "remove_from_cart"):
             try:
                 result = json.loads(output or "{}")
                 self.cart_waiting = not result.get("done")
@@ -357,6 +373,8 @@ class CardCollector:
             self.products_fixed = tool_name in FIXED_RESULT_TOOLS
         if name == "outfit":
             self.outfits.append(cards)
+        if tool_name == "remove_from_cart":
+            self.removed = cards
         setattr(self, name, cards)
         return name, cards
 
@@ -411,6 +429,11 @@ class CardCollector:
         An outfit is exempt: it *is* the answer, priced and totalled, so it is
         sent whole, and the browse that fed it is dropped as noise.
         """
+        # Taking something out of the bag shows what came out, and nothing else:
+        # not the search that found it, not the rest of the bag.
+        if self.removed is not None:
+            self.products, self.products_fixed = self.removed, True
+            return
         # An outfit or an order listing IS the answer, so any browse that fed it
         # is dropped as noise - once it has given up any alternative the reply
         # offered from it.

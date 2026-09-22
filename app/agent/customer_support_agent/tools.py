@@ -16,7 +16,7 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.services import compare, handbook, order_changes, outfit, shopify_storefront, store_profile
+from app.services import cart_removal, compare, handbook, order_changes, outfit, shopify_storefront, store_profile
 from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError, store_domain
 
@@ -83,6 +83,27 @@ async def add_to_cart(items: list[dict]) -> str:
         return json.dumps(await outfit.cart_additions(items), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("add_to_cart", exc)
+
+
+@tool
+async def remove_from_cart(items: list[dict]) -> str:
+    """Take products out of the shopper's bag - "remove the belt", "take out the
+    pink one", "I don't want the dress any more", "empty my bag". The storefront
+    does the removing; this finds the exact line in their bag.
+
+    items: [{"product": "<name as they said it>", "color": "Pink", "size": "5Y",
+      "quantity": 1}] - color and size only when they said one, quantity only when
+      they said how many (otherwise the whole line goes). "this"/"it" is the
+      product they are viewing. {"product": "everything"} empties the bag.
+    done=true: confirm in one line what came out.
+    needs_choice: NOTHING was removed - more than one line in their bag answers
+      to that name (in_cart lists them): ask which, then call again.
+    problems: not_in_cart - say it is not in their bag (in_cart lists what is).
+    """
+    try:
+        return json.dumps(await cart_removal.cart_removals(items), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("remove_from_cart", exc)
 
 
 @tool
@@ -459,6 +480,7 @@ CUSTOMER_SUPPORT_TOOLS = [
     suggest_pieces,
     compare_products,
     add_to_cart,
+    remove_from_cart,
     go_to_checkout,
     browse_catalogue,
     build_outfit,

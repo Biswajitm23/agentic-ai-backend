@@ -19,6 +19,8 @@ CHECKOUT = "checkout"
 CHECKOUT_FROM_EXISTING = "checkout from existing"
 # Only ever the agent's own doing - "take me to my bag" - never read off the words.
 OPEN_CART = "open cart"
+# Also only the agent's doing: remove_from_cart found the exact lines in the bag.
+REMOVE_FROM_CART = "remove from cart"
 
 # Where each word leaves the shopper; adding alone keeps them on the page.
 _PAGE = {CHECKOUT: "checkout", CHECKOUT_FROM_EXISTING: "checkout", OPEN_CART: "cart"}
@@ -73,9 +75,8 @@ def cart_action(
     *,
     bag_empty: bool = False,
     waiting: bool = False,
-    reply: str = "",
 ) -> str | None:
-    """ADD_PREVIOUS, CHECKOUT, CHECKOUT_FROM_EXISTING, OPEN_CART, or None.
+    """REMOVE_FROM_CART, ADD_PREVIOUS, CHECKOUT, CHECKOUT_FROM_EXISTING, OPEN_CART, or None.
 
     Only what the shopper chose goes in the bag, so nothing is added here that
     the agent's add_to_cart did not add, in the exact variants it resolved: the
@@ -84,15 +85,17 @@ def cart_action(
     issued: the ``action`` dicts the agent's own tools produced this turn. Checking
     out wins over adding - "add these and checkout" is a checkout with them in it.
     bag_empty: the widget sent a cart with nothing in it.
-    waiting: the agent's add_to_cart put nothing in and is asking a question.
-    reply: the agent's answer - one asking them to pick a size or colour is no
-    moment to leave the page either.
+    waiting: the agent's add_to_cart or remove_from_cart changed nothing and is
+    asking a question.
     """
-    if waiting or _asks_to_choose(reply):
+    if waiting:
         return None
     text = " ".join((message or "").lower().replace("’", "'").split())
     clauses = _clauses(text)
     issued = issued or []
+    # Taking something out leads: it carries the page to go to next, if any.
+    if any(a.get("type") == "remove_from_cart" and a.get("items") for a in issued):
+        return REMOVE_FROM_CART
     added = any(a.get("type") == "add_to_cart" and a.get("items") for a in issued)
 
     checkout = any(_CHECKOUT_RE.search(c) for c in clauses) or any(
@@ -122,6 +125,8 @@ def payload(word: str | None, issued: list[dict] | None = None) -> dict | None:
     """
     if not word:
         return None
+    if word == REMOVE_FROM_CART:
+        return _removal(issued or [])
     event: dict = {"action": word}
     if word != CHECKOUT_FROM_EXISTING:
         items = [line for a in issued or [] if a.get("type") == "add_to_cart"
@@ -133,4 +138,54 @@ def payload(word: str | None, issued: list[dict] | None = None) -> dict | None:
         event["page"] = page
         event["url"] = f"/{page}"
         event["absolute_url"] = f"https://{store_domain()}/{page}"
+    return event
+
+
+def _removal(issued: list[dict]) -> dict:
+    """The removal event: only the lines coming out, then anything else this turn did.
+
+    items     - {variant_id, title, option, quantity, new_quantity}: take quantity
+                out of that line, leaving new_quantity (0 = the line goes).
+    add_items - a swap ("the blue one instead"): {variant_id, quantity} to add after.
+    url       - where to go afterwards, when they also asked for checkout or the bag.
+    """
+    event: dict = {
+        "action": REMOVE_FROM_CART,
+        "items": [line for a in issued if a.get("type") == "remove_from_cart" for line in a.get("items") or []],
+    }
+    adding = [line for a in issued if a.get("type") == "add_to_cart" for line in a.get("items") or []]
+    if adding:
+        event["add_items"] = adding
+    page = next((a.get("page") for a in issued if a.get("type") == "redirect"), None)
+    if page in ("checkout", "cart"):
+        event["page"] = page
+        event["url"] = f"/{page}"
+        event["absolute_url"] = f"https://{store_domain()}/{page}"
+    return event
+
+
+def decide(
+    message: str,
+    issued: list[dict] | None = None,
+    *,
+    bag_empty: bool = False,
+    waiting: bool = False,
+    reply: str = "",
+) -> dict | None:
+    """The one ``actions`` event for this turn, or None.
+
+    A reply asking them to pick something - a size, a colour, which one - is no
+    moment to leave the page, so it goes nowhere. What already went in or came
+    out still stands: "Added the dress - which size for the shoes?" adds the dress.
+    """
+    word = cart_action(message, issued, bag_empty=bag_empty, waiting=waiting)
+    if _asks_to_choose(reply):
+        if word == CHECKOUT:
+            word = ADD_PREVIOUS
+        elif word not in (ADD_PREVIOUS, REMOVE_FROM_CART):
+            word = None
+    event = payload(word, issued)
+    if event and _asks_to_choose(reply):
+        for key in ("page", "url", "absolute_url"):
+            event.pop(key, None)
     return event

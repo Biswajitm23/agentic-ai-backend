@@ -108,6 +108,14 @@ def choice_chips(needs_choice: list[dict], reply: str = "") -> list[dict]:
         if "product" in missing:
             return [{"label": t, "prompt": t, "kind": "product"}
                     for t in entry.get("which_product") or []][:CHOICE_LIMIT]
+        if "which_one" in missing:
+            # Two lines of the bag answer to the name: which comes out?
+            chips = []
+            for line in entry.get("in_cart") or []:
+                title, option = line.get("title") or "", line.get("option") or ""
+                named = f"{title} ({option})" if option and option not in title else title
+                chips.append({"label": option or title, "prompt": f"Remove the {named}", "kind": "cart_line"})
+            return chips[:CHOICE_LIMIT]
         kinds = [k for k in ("color", "size") if k in missing]
         if not kinds:
             continue

@@ -30,7 +30,7 @@ from app.agent.customer_support_agent.shopper_context import (
 from app.api.v1 import cart_actions
 from app.api.v1.cards import CardCollector
 from app.services import shopify_storefront, shopper_identity as identity
-from app.services import shopper_words, store_profile, suggestions
+from app.services import cart_removal, shopper_words, store_profile, suggestions
 from app.services.shopify_client import ShopifyError
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
@@ -317,7 +317,13 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                  url?, absolute_url?}            turn at most. action is "add previous
                                                  products in cart" or "checkout" (both
                                                  with items), "checkout from existing"
-                                                 (the bag as it is) or "open cart".
+                                                 (the bag as it is), "open cart", or
+                                                 "remove from cart": items are then
+                                                 only the lines coming out, {variant_id,
+                                                 title, option, quantity, new_quantity},
+                                                 add_items any swap to add after - and
+                                                 the products event carries only the
+                                                 removed products.
                                                  items: exactly these {variant_id,
                                                  quantity} to add first, in the size
                                                  and colour the shopper chose - never
@@ -399,6 +405,11 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # What the shopper has said, so the bag takes only a size and colour
         # they chose - never one the agent filled in.
         words_token = shopper_words.set_words([c for role, c in history if role == "user"] + [req.message])
+        # Their bag as the widget sent it, so remove_from_cart finds the exact line.
+        bag_token = cart_removal.set_cart(
+            [line.model_dump() for line in req.cart.items] if req.cart is not None else None,
+            req.cart.currency if req.cart is not None else None,
+        )
         try:
             async for event in CUSTOMER_SUPPORT_AGENT.stream(with_context(req.message, briefing), history):
                 if event["type"] == "token":
@@ -420,6 +431,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             identity.reset(token)
             identity.reset_session(session_token)
             shopper_words.reset(words_token)
+            cart_removal.reset(bag_token)
 
         await _save_turn(session_id, req.message, reply)
         # Repeated in `done` so a client that only reads the final event still
@@ -433,13 +445,12 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # One instruction for the widget, and only ever one: add what it showed
         # (or exactly these variants), then go to checkout or the bag. Repeated in
         # `done` for a client that only reads the last event - carry it out once.
-        cart_action = cart_actions.cart_action(
+        actions = cart_actions.decide(
             req.message, cards.actions,
             bag_empty=req.cart is not None and not req.cart.items,
             waiting=cards.cart_waiting,
             reply=reply,
         )
-        actions = cart_actions.payload(cart_action, cards.actions)
         if actions:
             yield _sse("actions", actions)
 
