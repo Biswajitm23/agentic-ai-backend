@@ -306,16 +306,6 @@ async def build_outfit(items: str | list, budget: float = 0) -> str:
 
 
 
-# Words that ask for the list of shelves, not for one shelf: "collections" is
-# not a collection, and browsing for it answered "we have no section called
-# collections" to a shopper asking to see them all.
-_LIST_OF_SHELVES = {
-    "collection", "collections", "all collections", "category", "categories", "all categories",
-    "section", "sections", "department", "departments", "range", "ranges", "shop all", "all",
-    "everything", "all products", "the collections", "your collections", "your categories",
-}
-
-
 async def _collection_list() -> dict:
     found = await shopify_storefront.collections(shopify_storefront.COLLECTION_LIMIT)
     return {
@@ -371,7 +361,9 @@ async def browse_category(category: str) -> str:
     rather than passing them off as part of the category.
     """
     try:
-        if " ".join(str(category or "").lower().split()) in _LIST_OF_SHELVES:
+        # "collections" is not a collection: asked for it, they want the list.
+        # Browsing for it answered "we have no section called collections".
+        if shopify_storefront.asks_for_collection_list(category):
             return json.dumps(await _collection_list(), ensure_ascii=False)
         return json.dumps(
             await shopify_storefront.category_products(category), ensure_ascii=False

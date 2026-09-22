@@ -517,6 +517,14 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # Asked on the way to checkout, a tapped answer carries the checkout on.
         then = " and checkout" if checking_out else ""
         chips = suggestions.choice_chips(cards.cart_choice, reply, then=then) if cards.cart_waiting else []
+        if not chips and not cards.collections_listed and shopify_storefront.asks_for_collection_list(req.message):
+            # They asked for the collections, whichever tool the agent reached for.
+            try:
+                cards.collections_listed = (
+                    await shopify_storefront.collections(shopify_storefront.COLLECTION_LIMIT)
+                )["collections"]
+            except Exception:  # noqa: BLE001 - never fail a reply over a chip row
+                logger.warning("Could not list collections for session %s", session_id, exc_info=True)
         if not chips and cards.collections_listed:
             # "Show me all your collections": every one of them, to tap.
             chips = suggestions.collection_chips(cards.collections_listed)

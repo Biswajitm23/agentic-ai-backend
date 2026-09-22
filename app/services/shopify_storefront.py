@@ -1428,6 +1428,30 @@ async def _audience_shelf(audience: str, asked: str, limit: int) -> dict | None:
     }
 
 
+# "Collections" and "categories" both mean the store's collections: asked for
+# them, the shopper wants the list, not a shelf called "collections". Matched on
+# what is left once the asking words go, so "show me all the collections" and
+# "what categories do you have" are caught while "Winter Collection" - a real
+# collection's name - is not.
+_SHELF_LIST_WORDS = {
+    "collection", "collections", "category", "categories", "section", "sections",
+    "department", "departments", "range", "ranges", "everything",
+}
+_ASKING_WORDS = {
+    "all", "the", "your", "our", "of", "every", "available", "list", "show", "me", "see", "view",
+    "browse", "tell", "about", "shop", "you", "have", "got", "any", "a", "an", "please", "what",
+    "which", "are", "is", "there", "do", "does", "can", "could", "i", "give", "get", "different",
+    "kinds", "kind", "types", "type", "store", "sell", "offer", "whole", "full", "in", "here",
+}
+
+
+def asks_for_collection_list(text: str) -> bool:
+    """Whether the words ask for the list of collections rather than one of them."""
+    words = re.findall(r"[a-z]+", (text or "").lower())
+    rest = [w for w in words if w not in _ASKING_WORDS]
+    return bool(rest) and all(w in _SHELF_LIST_WORDS for w in rest)
+
+
 async def category_products(category: str, limit: int = 12) -> dict:
     """Everything buyable in one category, for a shopper who named or tapped it.
 
