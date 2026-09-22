@@ -126,7 +126,7 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
         for word in words:
             frequency[word] = frequency.get(word, 0) + 1
 
-    kept = []
+    kept, by_share = [], []
     for item, words in title_words:
         if not words:
             continue
@@ -141,7 +141,14 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
             core = (words - _KINDS) or words
             if len(core & said) / len(core) >= _MENTION_RATIO:
                 kept.append(item)
-    return kept
+                by_share.append(item)
+    # A title that is only part of another one kept - "Catherine ... Dress" inside
+    # "Catherine ... Dress in Pink" - was matched by that one's words: one dress
+    # named, two cards drawn. It goes.
+    words_of = {id(item): words for item, words in title_words}
+    return [item for item in kept
+            if not (item in by_share and any(words_of[id(item)] < words_of[id(other)]
+                                             for other in kept if other is not item))]
 
 
 def keep_orders_mentioned(orders: list[dict], reply: str) -> list[dict]:
@@ -276,7 +283,8 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
 
     if tool_name in BAG_TOOLS:
         key, change, heading = BAG_TOOLS[tool_name]
-        items = data.get(key) or []
+        # An add that made room shows what came out beside what went in.
+        items = [*(data.get("replaced") or []), *(data.get(key) or [])]
         if not items:
             return None                     # nothing changed: a question, or not in the bag
         return {
@@ -370,7 +378,10 @@ class CardCollector:
         if tool_name in BAG_TOOLS:
             try:
                 result = json.loads(output or "{}")
-                self.cart_waiting = not result.get("done")
+                # add_to_cart puts in what is chosen and asks about the rest; the
+                # others change nothing until every question is answered.
+                self.cart_waiting = (bool(result.get("needs_choice")) if tool_name == "add_to_cart"
+                                     else not result.get("done"))
                 self.cart_choice = result.get("needs_choice") or []
             except (TypeError, ValueError, AttributeError):
                 self.cart_waiting, self.cart_choice = True, []

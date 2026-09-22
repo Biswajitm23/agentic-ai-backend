@@ -49,6 +49,23 @@ class ShownProducts(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class PendingAdds(Base):
+    """Products a shopper asked to add that are still waiting on a size or colour.
+
+    "Add all of them" is five dresses and five questions, one per turn. The agent
+    kept the first answer and lost the rest - "which dress next?" - so the list
+    lives here instead, and add_to_cart works through it until every one is in.
+    """
+
+    __tablename__ = "chat_pending_adds"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # [{product, handle, color, size, quantity, candidates?}], in the order asked.
+    items: Mapped[list] = mapped_column(JSON, default=list)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class OrderChangeRequest(Base):
     """A cancellation or address change a shopper has started but not confirmed.
 

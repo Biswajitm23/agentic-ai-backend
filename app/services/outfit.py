@@ -266,26 +266,60 @@ def _cart_line(product: dict, variant: dict, quantity: int) -> dict:
     }
 
 
-async def cart_additions(items: list[dict]) -> dict:
+SIMILAR_DECISIONS = {"replace", "both", "skip"}
+
+
+async def cart_additions(items: list[dict], forget_others: bool = False, similar: str = "") -> dict:
     """What to add to the bag, as exact variants, and the instruction to add them.
 
     Each item names a product ("Catherine gingham dress", or a handle) with its
     colour, size and quantity - or gives a variant id a tool already produced,
-    such as build_outfit's cart_items. The instruction is only issued when every
-    item resolved: half a request quietly added is worse than one more question.
+    such as build_outfit's cart_items.
+
+    Whatever is fully chosen goes in now; whatever still needs a size, a colour
+    or a choice of product waits, kept for this chat, and is picked up again by
+    every later call - so "add all of them" works through every dress, one
+    question at a time, however little the agent passes back each turn.
+    forget_others drops the waiting ones: "just that one, thanks".
+
+    A single piece whose kind is already in the bag - a second dress - is asked
+    about first: replace the one there, keep both, or leave this one out.
+    similar carries that answer; the shopper's own words are read for it too.
+    Several asked for at once ("add all of them") are never asked this: they
+    said they want every one.
     """
-    from app.services import compare
-    from app.services.shopify_storefront import collection_tree
+    from app.services import cart_removal, compare, pending_adds, shopper_identity
+    from app.services.shopify_storefront import cart_cards, collection_tree
 
+    session = shopper_identity.current_session()
     currency = (await shop_info())["currency"]
-    lines: list[dict] = []
-    needs_choice: list[dict] = []
-    problems: list[dict] = []
     tree: dict | None = None
+    bag = cart_removal.bag_lines()
+    decided = similar if similar in SIMILAR_DECISIONS else shopper_words.similar_decision()
 
-    for item in items or []:
-        if not isinstance(item, dict):
-            continue
+    async def the_tree() -> dict:
+        nonlocal tree
+        if tree is None:
+            tree = await collection_tree()
+        return tree
+
+    def kind_of(product_id, title) -> str:
+        t = tree or {"type_of": {}}
+        return (t["type_of"].get(str(product_id or "")) or
+                t["type_of"].get((title or "").strip().lower()) or "").lower()
+
+    def like_it_in_bag(product: dict, variant_id: str | None = None) -> list[dict]:
+        """Bag lines of the same kind of piece - another dress - but never this very variant."""
+        kind = kind_of(product.get("legacyResourceId"), product.get("title")) or (product.get("productType") or "").lower()
+        if not kind:
+            return []
+        return [line for line in bag
+                if kind_of(line.get("product_id"), line.get("title")) == kind
+                and str(line.get("variant_id")) != str(variant_id or "")]
+
+    async def one(item: dict, waiting_before: list[dict]) -> dict:
+        """One item's fate: {"line"}, {"choice", "waiting"}, {"skipped"} or {"problem"},
+        with the product's handle and title whenever it was found."""
         try:
             quantity = min(MAX_CART_QUANTITY, max(1, int(item.get("quantity") or 1)))
         except (TypeError, ValueError):
@@ -298,8 +332,8 @@ async def cart_additions(items: list[dict]) -> dict:
             )["productVariant"]
             product = (node or {}).get("product") or {}
             if not node or product.get("status") != "ACTIVE":
-                problems.append({"variant_id": variant_id, "reason": "not_found_or_not_for_sale"})
-                continue
+                return {"problem": {"variant_id": variant_id, "reason": "not_found_or_not_for_sale"}}
+            found = {"handle": product["handle"], "title": product["title"]}
             # A variant from a look the agent priced still has to be the size
             # and colour the shopper wants.
             offered = _options_of(product)
@@ -307,66 +341,129 @@ async def cart_additions(items: list[dict]) -> dict:
             sizes = offered.get("Size") or []
             missing, unconfirmed = _unchosen(colours, sizes, _colour_of(node), _option_value(node, "Size"))
             if missing:
-                needs_choice.append(_choice_needed(product["title"], missing, unconfirmed, colours, sizes))
-            elif not node["availableForSale"]:
-                problems.append({"title": product["title"], "option": node["title"], "reason": "out_of_stock"})
-            else:
-                lines.append(_cart_line(product, node, quantity))
-            continue
+                return {**found, "choice": _choice_needed(product["title"], missing, unconfirmed, colours, sizes),
+                        "waiting": {"product": product["title"], "handle": product["handle"],
+                                    "quantity": quantity, "together": True}}
+            if not node["availableForSale"]:
+                return {**found, "problem": {"title": product["title"], "option": node["title"],
+                                             "reason": "out_of_stock"}}
+            return {**found, "line": _cart_line(product, node, quantity)}
 
         name = str(item.get("product") or item.get("handle") or item.get("title") or "").strip()
         if not name:
-            problems.append({"reason": "no_product_named"})
-            continue
-        if tree is None:
-            tree = await collection_tree()
-        handle = name if name in tree["handles"].values() else None
-        if handle is None and " ".join(name.lower().split()) not in tree["ids"]:
-            rivals = compare.matches(name, tree["ids"])
-            if len(rivals) > 1:
+            return {"problem": {"reason": "no_product_named"}}
+        t = await the_tree()
+        known = set(t["handles"].values())
+        handle = next((h for h in (item.get("handle"), name) if h in known), None)
+        if handle is None and " ".join(name.lower().split()) not in t["ids"]:
+            rivals = compare.matches(name, t["ids"])
+            # Two answer to the name, but one of them is already waiting to be
+            # added: that is the one meant, not a reason to ask "which?".
+            waiting_for = [r for r in rivals if t["handles"][t["ids"][r]] in {w.get("handle") for w in waiting_before}]
+            if len(rivals) > 1 and len(waiting_for) == 1:
+                handle = t["handles"][t["ids"][waiting_for[0]]]
+            elif len(rivals) > 1:
                 # Two products answer to the name ("Catherine gingham dress" is two
                 # listings). A comparison can live with the nearer one; a bag cannot.
-                needs_choice.append({
-                    "asked_for": name,
-                    "missing": ["product"],
-                    "which_product": [tree["titles"][tree["ids"][t]] for t in rivals[:4]],
-                })
-                continue
+                candidates = [t["titles"][t["ids"][r]] for r in rivals[:4]]
+                return {"choice": {"asked_for": name, "missing": ["product"], "which_product": candidates},
+                        "waiting": {"product": name, "candidates": candidates, "quantity": quantity,
+                                    "together": item.get("together")}}
         if handle is None:
-            product_id, near = compare.resolve(name, tree["ids"], tree["titles"])
+            product_id, near = compare.resolve(name, t["ids"], t["titles"])
             if product_id is None:
-                problems.append({"asked_for": name, "reason": "not_found", "did_you_mean": near})
-                continue
-            handle = tree["handles"][product_id]
+                return {"problem": {"asked_for": name, "reason": "not_found", "did_you_mean": near}}
+            handle = t["handles"][product_id]
         product = next(iter(await _active_products([handle])), None)
         if product is None:
-            problems.append({"asked_for": name, "reason": "not_found_or_not_for_sale"})
-            continue
+            return {"problem": {"asked_for": name, "reason": "not_found_or_not_for_sale"}}
+        found = {"handle": handle, "title": product["title"]}
+        # An answer to something already waiting carries on from where it was:
+        # its colour, its size, and whether it came as one of several. "Which
+        # Catherine dress?" waits with no product of its own, so the one they
+        # picked is found among its candidates.
+        earlier = next((w for w in waiting_before if w.get("handle") == handle), None) or next(
+            (w for w in waiting_before if product["title"] in (w.get("candidates") or [])), {})
+        item = {**{k: v for k, v in earlier.items() if v not in (None, "") and k != "candidates"},
+                **{k: v for k, v in item.items() if v not in (None, "")}}
+        # Part of "add all of them": they want every one, so no "keep both?".
+        together = item.get("together") or in_a_batch
+        decision = item.get("similar") or (None if together else decided)
+        waiting = {"product": product["title"], "handle": handle, "quantity": quantity,
+                   "together": together, "similar": decision}
+
+        # Another of the same kind of piece already in the bag, and they have not
+        # said what they want: ask before anything else.
+        alike = like_it_in_bag(product)
+        if alike and not together and decision is None:
+            return {**found,
+                    "choice": {"title": product["title"], "missing": ["similar_in_bag"],
+                               "in_bag": [{"title": l.get("title"), "option": l.get("variant_title")} for l in alike]},
+                    "waiting": {**waiting, "color": item.get("color") or item.get("colour"), "size": item.get("size")}}
+        if decision == "skip" and alike:
+            return {**found, "skipped": True}
 
         options = _options_of(product)
         colours = options.get("Color") or options.get("Colour") or []
         sizes = options.get("Size") or []
-        colour = item.get("color") or item.get("colour") or (colours[0] if len(colours) == 1 else None)
-        size = item.get("size") or (sizes[0] if len(sizes) == 1 else None)
+        given_colour, given_size = item.get("color") or item.get("colour"), item.get("size")
+        colour = given_colour or (colours[0] if len(colours) == 1 else None)
+        size = given_size or (sizes[0] if len(sizes) == 1 else None)
         missing, unconfirmed = _unchosen(colours, sizes, colour, size)
         if missing:
-            needs_choice.append(_choice_needed(product["title"], missing, unconfirmed, colours, sizes))
-            continue
+            # Waits with whatever they did choose, so the colour is not asked twice.
+            return {**found, "choice": _choice_needed(product["title"], missing, unconfirmed, colours, sizes),
+                    "waiting": {**waiting,
+                                "color": given_colour if given_colour and "color" not in missing else None,
+                                "size": given_size if given_size and "size" not in missing else None}}
 
         variant = _match_variant(product, colour, size)
         if variant is None:
-            problems.append({"title": product["title"], "reason": "no_variant_for_that_choice",
-                             "available_colors": colours, "available_sizes": sizes})
-        elif not variant["availableForSale"]:
-            problems.append({"title": product["title"], "option": variant["title"], "reason": "out_of_stock"})
-        else:
-            lines.append(_cart_line(product, variant, quantity))
+            return {**found, "problem": {"title": product["title"], "reason": "no_variant_for_that_choice",
+                                         "available_colors": colours, "available_sizes": sizes}}
+        if not variant["availableForSale"]:
+            return {**found, "problem": {"title": product["title"], "option": variant["title"],
+                                         "reason": "out_of_stock"}}
+        outcome = {**found, "line": _cart_line(product, variant, quantity)}
+        if decision == "replace":
+            outcome["replace"] = like_it_in_bag(product, variant.get("legacyResourceId"))
+        return outcome
+
+    waiting_before = [] if forget_others else await pending_adds.recall(session)
+    # While "add all of them" is still being worked through, everything added is
+    # part of it - even a dress the agent passes back under a slightly different name.
+    in_a_batch = any(w.get("together") for w in waiting_before)
+    asked = [item for item in items or [] if isinstance(item, dict)]
+    # Several at once is its own answer to "keep both?": they want every one.
+    if len(asked) > 1:
+        asked = [{**item, "together": True} for item in asked]
+    await the_tree()
+    outcomes = [await one(item, waiting_before) for item in asked]
+
+    # Everything still waiting from earlier in the chat that this call did not
+    # just answer: the agent passes the dress that was answered, and the other
+    # four come back as the next question.
+    answered_handles = {o["handle"] for o in outcomes if o.get("handle")}
+    answered_titles = {o["title"] for o in outcomes if o.get("title")}
+    for waiting in waiting_before:
+        if waiting.get("handle") in answered_handles:
+            continue
+        if set(waiting.get("candidates") or []) & answered_titles:
+            continue
+        outcomes.append(await one(waiting, waiting_before))
+
+    lines = [o["line"] for o in outcomes if "line" in o]
+    needs_choice = [o["choice"] for o in outcomes if "choice" in o]
+    problems = [o["problem"] for o in outcomes if "problem" in o]
+    skipped = [o["title"] for o in outcomes if o.get("skipped")]
+    try:
+        await pending_adds.keep(session, [o["waiting"] for o in outcomes if "waiting" in o])
+    except Exception:  # noqa: BLE001 - a lost queue means asking again, never a failed add
+        logger.warning("Could not keep the products still to add for %s", session, exc_info=True)
 
     # Already in their bag: the agent sends the whole request again after each
     # answer ("12M for the George shirt" came back as both shirts), and every
     # repeat put another August shirt in the bag. Only "another one" adds more.
-    from app.services import cart_removal
-
     in_bag = cart_removal.bag_variant_ids()
     already = [line for line in lines if str(line["variant_id"]) in in_bag]
     if already and not shopper_words.asks_for_more():
@@ -374,26 +471,49 @@ async def cart_additions(items: list[dict]) -> dict:
     else:
         already = []
 
-    done = bool(lines) and not needs_choice and not problems
+    # What comes out to make room: "replace the Catherine dress with this one".
+    going: dict[str, dict] = {}
+    for o in outcomes:
+        if o.get("replace") and "line" in o and o["line"] in lines:
+            for line in o["replace"]:
+                going.setdefault(str(line.get("variant_id")), line)
+    replaced = []
+    if going:
+        cards = await cart_cards(list(going.values()), currency)
+        for (variant_id, line), card in zip(going.items(), cards):
+            have = int(line.get("quantity") or 1)
+            unit = round(card["price"] / have, 2) if card.get("price") is not None else None
+            replaced.append({**card, "variant_id": variant_id, "change": "removed", "price": unit,
+                             "quantity": have, "quantity_before": have, "new_quantity": 0,
+                             "line_total": round(unit * have, 2) if unit is not None else None})
+
     result: dict = {
-        "done": done,
+        # Everything they asked for is in, was already, or was left out on purpose.
+        "done": not needs_choice and not problems and bool(lines or already or skipped),
         "currency": currency,
-        # Named for what they are: given "lines" beside a question about the
-        # shoes, the agent told the shopper the dress was already in their bag.
-        ("added" if done else "not_added_yet"): lines,
+        "added": lines,
         "needs_choice": needs_choice,
+        "still_to_add": len(needs_choice),
         "problems": problems,
     }
-    if not done and lines:
-        result["note"] = ("Nothing is in the bag yet - these go in together with the rest, "
-                          "once every choice is made.")
+    if replaced:
+        result["replaced"] = replaced
+    if skipped:
+        result["skipped"] = skipped
     if already:
         result["already_in_bag"] = [{"title": line["title"], "option": line.get("option")} for line in already]
-    if done:
+    adding = [{"variant_id": line["variant_id"], "quantity": line["quantity"]} for line in lines]
+    if replaced and adding:
+        # One change to the bag: the old one out, the new one in.
         result["action"] = {
-            "type": "add_to_cart",
-            "items": [{"variant_id": line["variant_id"], "quantity": line["quantity"]} for line in lines],
+            "type": "edit_cart",
+            "items": [{"variant_id": r["variant_id"], "title": r.get("title"), "option": r.get("option"),
+                       "color": r.get("color"), "size": r.get("size"),
+                       "quantity_before": r["quantity_before"], "new_quantity": 0} for r in replaced],
+            "add_items": adding,
         }
+    elif adding:
+        result["action"] = {"type": "add_to_cart", "items": adding}
     return result
 
 

@@ -68,9 +68,11 @@ def _clauses(text: str) -> list[str]:
     return [_NEGATED_RE.sub(" ", p) for p in parts if p and not _QUESTION_RE.search(p)]
 
 
-# The reply asks them to choose something - a size, a colour, which one.
+# The reply asks them to choose something - a size, a colour, which one - with
+# a question mark or without: "let me know the size you'd like".
 _CHOOSING_RE = re.compile(r"\b(?:sizes?|colou?rs?|which\s+(?:one|of)|shade)\b", re.I)
-_ASKED_RE = re.compile(r"[^.!?\n]*\?")
+_ASKED_RE = re.compile(r"[^.!?\n]*\?|[^.!?\n]*\b(?:let me know|tell me|please (?:choose|pick|select))\b[^.!?\n]*",
+                       re.I)
 
 
 def _asks_to_choose(reply: str) -> bool:
@@ -93,11 +95,9 @@ def cart_action(
     issued: the ``action`` dicts the agent's own tools produced this turn. Checking
     out wins over adding - "add these and checkout" is a checkout with them in it.
     bag_empty: the widget sent a cart with nothing in it.
-    waiting: the agent's add_to_cart or remove_from_cart changed nothing and is
-    asking a question.
+    waiting: a question about the bag is still open - decide() keeps the
+    shopper on the page, but what already went in still goes.
     """
-    if waiting:
-        return None
     text = " ".join((message or "").lower().replace("’", "'").split())
     clauses = _clauses(text)
     issued = issued or []
@@ -224,13 +224,16 @@ def decide(
     out still stands: "Added the dress - which size for the shoes?" adds the dress.
     """
     word = cart_action(message, issued, bag_empty=bag_empty, waiting=waiting)
-    if _asks_to_choose(reply):
+    # Still asking - the next dress's size, say - so nobody leaves the page yet:
+    # checkout comes once the last one is in.
+    staying = waiting or _asks_to_choose(reply)
+    if staying:
         if word == CHECKOUT:
             word = ADD_PREVIOUS
         elif word not in (ADD_PREVIOUS, REMOVE_FROM_CART, EDIT_FROM_CART):
             word = None
     event = payload(word, issued)
-    if event and _asks_to_choose(reply):
+    if event and staying:
         for key in ("page", "url", "absolute_url"):
             event.pop(key, None)
     return event

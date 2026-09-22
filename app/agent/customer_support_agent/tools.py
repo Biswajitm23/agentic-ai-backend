@@ -62,7 +62,7 @@ async def check_order_status(order_number: str, email: str) -> str:
 
 
 @tool
-async def add_to_cart(items: list[dict]) -> str:
+async def add_to_cart(items: list[dict], forget_others: bool = False, similar: str = "") -> str:
     """Put products in the shopper's bag. The storefront does the adding; this
     finds the exact variant and tells it which.
 
@@ -71,18 +71,26 @@ async def add_to_cart(items: list[dict]) -> str:
       shopper said themselves - it checks their words, and anything else comes
       back unconfirmed. build_outfit's cart_items ([{"variant_id", "quantity"}])
       are checked the same way.
-    done=true: it is going in - confirm in one line what was added.
-    needs_choice: NOTHING was added, not even the pieces in not_added_yet - never
-      say any of it is in the bag. Ask for exactly what it lists as missing,
-      from its available options, then call again. unconfirmed is a value you
-      chose, not them: offer it if you like, but they must say it. The shopper
-      is shown the options as buttons.
+    added: these go in now - confirm them in a few words.
+    needs_choice: still waiting, in order. It remembers them itself across the
+      chat, so ask about the FIRST one only - just what it lists as missing, the
+      shopper is shown its options as buttons - and on their answer call again
+      with just that; the next comes back until needs_choice is empty. Never say
+      a waiting product is in the bag. unconfirmed is a value you chose, not
+      them: offer it if you like, but they must say it.
+    forget_others=true when they say they want only some of them, or none of
+      the rest - the waiting ones are then dropped.
+    missing "similar_in_bag": the same kind of piece is already in their bag
+      (in_bag). Ask whether to replace it, keep both, or not add this one - the
+      options are shown as buttons - then call again with similar = "replace",
+      "both" or "skip" as they answered. replaced: what came out to make room.
+    done=true: everything they asked for is in.
     problems: out of stock, no such option, or not found - say which.
     already_in_bag: those were in their bag already and were not added again -
       say so; only "another one" / "one more" adds a second.
     """
     try:
-        return json.dumps(await outfit.cart_additions(items), ensure_ascii=False)
+        return json.dumps(await outfit.cart_additions(items, forget_others, similar), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("add_to_cart", exc)
 

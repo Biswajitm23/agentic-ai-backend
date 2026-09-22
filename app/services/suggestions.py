@@ -75,11 +75,24 @@ _QUESTION_KINDS = [
 ]
 
 
-def _asks_a_question(reply: str) -> bool:
-    return "?" in reply
-
-
 _QUESTION_RE = re.compile(r"[^.!?\n]*\?")
+# Asking without a question mark: "just let me know the size you'd like for
+# each dress." had shelves under it, because only "?" counted as asking.
+_ASK_WITHOUT_MARK_RE = re.compile(
+    r"[^.!?\n]*\b(?:let me know|tell me|please (?:choose|pick|select)|"
+    r"(?:pick|choose) (?:one|a size|a colou?r|the size|the colou?r))\b[^.!?\n]*"
+    # "Which size would you like for the Catherine dress, and I'll add it."
+    r"|(?:^|(?<=[.!?\n]))\s*(?:which|what)\s+(?:sizes?|colou?rs?|one|of)\b[^.!?\n]*",
+    re.I,
+)
+
+
+def _asking_sentences(reply: str) -> list[str]:
+    return _QUESTION_RE.findall(reply or "") or _ASK_WITHOUT_MARK_RE.findall(reply or "")
+
+
+def _asks_a_question(reply: str) -> bool:
+    return bool(_asking_sentences(reply))
 
 
 def _questions_in(reply: str) -> str:
@@ -89,7 +102,7 @@ def _questions_in(reply: str) -> str:
     under your 20,000 budget - want me to add it to the bag?" asks about the bag,
     and matching the whole reply put budget chips under it.
     """
-    return " ".join(_QUESTION_RE.findall(reply or ""))
+    return " ".join(_asking_sentences(reply))
 
 
 CHOICE_LIMIT = 10     # a size run is longer than a row of topic chips
@@ -125,6 +138,17 @@ def _choice_chips(needs_choice: list[dict], reply: str) -> list[dict]:
                 named = f"{title} ({option})" if option and option not in title else title
                 chips.append({"label": option or title, "prompt": f"{verb} {named}", "kind": "cart_line"})
             return chips[:CHOICE_LIMIT]
+        if "similar_in_bag" in missing:
+            # The same kind of piece is already in the bag: replace it, keep both,
+            # or leave this one out.
+            new = entry.get("title") or "this one"
+            there = entry.get("in_bag") or []
+            old = there[0].get("title") if len(there) == 1 else "one in my bag"
+            return [
+                {"label": "Replace it", "prompt": f"Replace the {old} with the {new}", "kind": "similar"},
+                {"label": "Keep both", "prompt": f"Keep both - add the {new} too", "kind": "similar"},
+                {"label": "Don't add this one", "prompt": f"Don't add the {new}", "kind": "similar"},
+            ]
         if "quantity" in missing:
             # "Change the quantity" with no number: the counts around what is there now.
             now = int(entry.get("quantity_now") or 1)
@@ -213,7 +237,7 @@ async def either_chips(reply: str) -> list[dict]:
             for pid in named][:CHOICE_LIMIT]
 
 
-async def asked_option_chips(reply: str, then: str = "") -> list[dict]:
+async def asked_option_chips(reply: str, then: str = "", fallback_title: str | None = None) -> list[dict]:
     """A size or colour question the agent asked itself, answered with that product's options.
 
     "What size for the Cream Boy's Belt?" came with Explore Dresses under it: the
@@ -229,8 +253,15 @@ async def asked_option_chips(reply: str, then: str = "") -> list[dict]:
         return []
     tree = await shopify_storefront.collection_tree()
     # Named in the question - or, when the question only says "its size", the
-    # one product the rest of the reply is about.
+    # one product the rest of the reply is about - or, asked "for each", the
+    # first of the products it names.
     product_id = _named_product(asked, tree) or _named_product(reply, tree)
+    if product_id is None and re.search(r"\b(?:each|first|all)\b", asked, re.I):
+        product_id = next(iter(_all_named(reply, tree)), None)
+    # "the Catherine gingham dress" is no title at all: the caller matched the
+    # shortened name against the products this chat has shown.
+    if product_id is None and fallback_title:
+        product_id = tree["ids"].get(fallback_title.strip().lower())
     if product_id is None:
         return []
     title, handle = tree["titles"][product_id], tree["handles"][product_id]
@@ -270,15 +301,90 @@ _CHOICE_LIST_RE = re.compile(r"^\s*\d+[.)]\s")
 
 def last_question(reply: str) -> str:
     """The last thing the reply asked, or ""."""
-    asked = _QUESTION_RE.findall(reply or "")
+    asked = _asking_sentences(reply)
     return asked[-1].strip() if asked else ""
 
 
+_WH_RE = re.compile(r"^\s*(?:which|what|where|when|who|whom|whose|why|how)\b", re.I)
+
+
+def _asking_part(question: str) -> str:
+    """The part of a question that asks: "The first size is 12M; want me to add it?"
+    asks "want me to add it", and "Just to be sure, which one?" asks "which one"."""
+    tail = re.split(r"[;:–—]|\s-\s", question or "")[-1].strip()
+    lead = re.match(r"^([^,]{0,40}),\s*(.+)$", tail)
+    if lead and (_WH_RE.match(lead.group(2)) or _YES_NO_RE.match(lead.group(2))):
+        tail = lead.group(2)
+    return tail
+
+
 def is_yes_no(question: str) -> bool:
-    """A question answered yes or no - "want me to add it?", not "pink or blue?"."""
-    # "The first size is 12M; want me to add it?" - the asking part is the last clause.
-    tail = re.split(r"[;:–—]|\s-\s", question or "")[-1]
+    """A question answered yes or no - "want me to add it?", not "pink or blue?", and
+    never one that starts "which" or "what": "Which of the dresses would you like
+    me to add?" was answered with a Yes chip."""
+    tail = _asking_part(question)
+    if _WH_RE.match(tail):
+        return False
     return bool(_YES_NO_RE.search(tail)) and not re.search(r"\bor\b", tail, re.I)
+
+
+# "Which of the dresses?" asks for products; "which size", "which occasion" or
+# "which order" do not, and have answers of their own.
+_WHICH_PRODUCT_RE = re.compile(r"^\s*which\b", re.I)
+_NOT_A_PRODUCT_RE = re.compile(
+    r"\b(?:sizes?|colou?rs?|occasion|age|budget|day|date|time|email|order|address|reason|way)\b", re.I)
+
+
+def asks_which_product(reply: str) -> bool:
+    """Whether the reply's question asks them to pick among products."""
+    asked = _asking_part(last_question(reply))
+    return bool(_WHICH_PRODUCT_RE.match(asked)) and not _NOT_A_PRODUCT_RE.search(asked)
+
+
+def product_chips(products: list[dict], then: str = "") -> list[dict]:
+    """The products to pick from, and all of them at once when there are several."""
+    titles = list(dict.fromkeys(p["title"] for p in products if p.get("title")))
+    chips = [{"label": "All of them", "prompt": f"All of them{then}", "kind": "product"}] if len(titles) > 1 else []
+    chips += [{"label": t, "prompt": f"{t}{then}", "kind": "product"} for t in titles]
+    return chips[:CHOICE_LIMIT]
+
+
+# Words that make an "option" a phrase of the question itself rather than an
+# answer: "would you like to see more or shall I show you shoes?" offers none.
+_QUESTION_WORDS = {"i", "you", "me", "shall", "should", "would", "could", "like", "want", "show", "let"}
+MAX_OPTION_WORDS = 5
+
+
+def options_in_question(reply: str) -> list[dict]:
+    """The options an either/or question offers, as chips.
+
+    "Did you mean all of the dresses, or only some of them?" - "All of the dresses"
+    and "Only some of them". "Which size - S / 60cm, L / 70cm or XL / 80cm?" -
+    each size. Each option is about as long as the last one, so the first is cut
+    down to that length from the words before it. Nothing is offered when the
+    options read as parts of a sentence rather than answers.
+    """
+    asked = last_question(reply).rstrip("?").strip()
+    head, sep, last = asked.rpartition(" or ")
+    if not sep:
+        return []
+    last = last.strip(" ,.")
+    width = len(last.split())
+    options = [last]
+    for part in reversed([p.strip() for p in re.split(r",\s*", head.rstrip(", ")) if p.strip()]):
+        words = part.split()
+        if len(words) <= max(width, 3) + 1:
+            options.insert(0, part)
+            continue
+        options.insert(0, " ".join(words[-width:]))
+        break
+    if not 2 <= len(options) <= 6:
+        return []
+    for option in options:
+        words = [w.lower().strip(".,") for w in option.split()]
+        if not words or len(words) > MAX_OPTION_WORDS or _QUESTION_WORDS & set(words):
+            return []
+    return [{"label": o[0].upper() + o[1:], "prompt": o[0].upper() + o[1:], "kind": "option"} for o in options]
 
 
 def is_affirmative(message: str) -> bool:
@@ -462,7 +568,7 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
         except Exception:  # noqa: BLE001 - chips are a nicety, never a reason to fail a reply
             logger.warning("Could not read the products a question offers", exc_info=True)
             either = []
-        return either or answer_chips(reply)
+        return either or options_in_question(reply) or answer_chips(reply)
 
     if not offers_best:
         try:

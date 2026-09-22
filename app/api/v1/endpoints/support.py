@@ -28,7 +28,7 @@ from app.agent.customer_support_agent.shopper_context import (
     with_context,
 )
 from app.api.v1 import cart_actions
-from app.api.v1.cards import CardCollector
+from app.api.v1.cards import CardCollector, keep_mentioned
 from app.services import shopify_storefront, shopper_identity as identity
 from app.services import cart_removal, shopper_words, shown_products, store_profile, suggestions
 from app.services.shopify_client import ShopifyError
@@ -149,6 +149,12 @@ async def _welcome_text() -> str:
         logger.warning("Could not read the shop name for the greeting", exc_info=True)
         name = "our store"
     return f"Welcome to {name} 👋\nAsk me anything you are interested in."
+
+
+_ADD_THEM_RE = re.compile(
+    r"\ball of (?:them|these|those|it)\b|\b(?:add|put|get|buy|want)\b[^.?!]*\b(?:them|these|those|all|both|everything)\b",
+    re.I,
+)
 
 
 def _empty_bag_note(shown: list[dict]) -> str:
@@ -384,6 +390,20 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             shown_earlier = []
         note = _empty_bag_note(shown_earlier)
         briefing = f"{briefing}\n\n{note}" if briefing else note
+    # "Add them", "all of them", "add both": every product this chat last showed,
+    # handed to add_to_cart in one go so it can ask for each in turn. Left to
+    # the model, it asked for one size and forgot the other four dresses.
+    if _ADD_THEM_RE.search(req.message or ""):
+        try:
+            shown_before = await shown_products.recall(session_id)
+        except Exception:  # noqa: BLE001 - a lost note is a plainer answer, not a failure
+            logger.warning("Could not recall shown products for %s", session_id, exc_info=True)
+            shown_before = []
+        titles = [p["title"] for p in shown_before if p.get("title")]
+        if len(titles) > 1:
+            note = (f"[\"Them\" is every product this chat last showed: {'; '.join(titles)}. Call "
+                    f"add_to_cart with all of them now - it asks for each size and colour in turn]")
+            briefing = f"{briefing}\n\n{note}" if briefing else note
     shopper = identity.resolve(req.customer)
 
     async def events() -> AsyncIterator[str]:
@@ -529,12 +549,26 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             # "Show me all your collections": every one of them, to tap.
             chips = suggestions.collection_chips(cards.collections_listed)
         if not chips and len(shown_earlier) > 1 and "?" in reply:
-            # "Which one?" on the way to checkout: the products this chat showed.
-            chips = [{"label": p["title"], "prompt": f"{p['title']}{then}", "kind": "product"}
-                     for p in shown_earlier if p.get("title")][:suggestions.CHOICE_LIMIT]
+            # "Which one?" on the way to checkout: the products this chat showed,
+            # and all of them at once.
+            chips = suggestions.product_chips(shown_earlier, then=then)
+        if not chips and suggestions.asks_which_product(reply):
+            # "Which of the dresses?" - the ones on screen, or the ones this chat
+            # last showed, and all of them at once.
+            try:
+                picked_from = cards.shown_products() or await shown_products.recall(session_id)
+            except Exception:  # noqa: BLE001 - never fail a reply over a chip row
+                logger.warning("Could not recall shown products for %s", session_id, exc_info=True)
+                picked_from = []
+            chips = suggestions.product_chips(picked_from, then=then)
         if not chips:
             try:
-                chips = await suggestions.asked_option_chips(reply, then=then)
+                # The product a size question means, when the reply shortens its
+                # name: the one of those shown in this chat that the reply names.
+                shown_now = cards.shown_products() or await shown_products.recall(session_id)
+                meant = keep_mentioned(shown_now, reply)
+                chips = await suggestions.asked_option_chips(
+                    reply, then=then, fallback_title=meant[0]["title"] if len(meant) == 1 else None)
             except Exception:  # noqa: BLE001 - never fail a reply over a chip row
                 logger.warning("Could not build option chips for session %s", session_id, exc_info=True)
                 chips = []

@@ -18,7 +18,11 @@ _words: ContextVar[tuple[str, str] | None] = ContextVar("shopper_words", default
 
 
 def _plain(text: str) -> str:
-    return " ".join((text or "").lower().replace("’", "'").split())
+    # Bracketed text is a product title's age range - "(12mths- 10yrs)" - carried
+    # in by a tapped chip, never a size the shopper chose: it read as 12M, and a
+    # dress went into the bag in a size nobody asked for.
+    text = re.sub(r"\([^)]*\)", " ", text or "")
+    return " ".join(text.lower().replace("’", "'").split())
 
 
 def set_words(messages: list[str], this_turn: str = ""):
@@ -39,6 +43,32 @@ _MORE_RE = re.compile(
     r"\b(?:another|one more|more of|again|extra|second one|twice|a second)\b"
     r"|\b\d+\s*(?:more|of them|of those|of these|x)\b"
 )
+
+
+def this_turn() -> str:
+    """What the shopper said this turn, lowercased; "" when unbound."""
+    bound = _words.get()
+    return bound[1] if bound else ""
+
+
+# Something like it is already in the bag: keep both, replace it, or leave this
+# one out. Read off the shopper's own words, the chips included.
+_SKIP_RE = re.compile(r"\b(?:don'?t add|do not add|cancel (?:it|this|that)|skip (?:it|this|that)|never ?mind|"
+                      r"leave (?:it|this one) out|not this one)\b")
+_REPLACE_RE = re.compile(r"\b(?:replace|swap|instead|in place of|remove the (?:other|previous|old|first|one))\b")
+_BOTH_RE = re.compile(r"\b(?:keep both|both|as well|too|also)\b")
+
+
+def similar_decision() -> str | None:
+    """"skip", "replace", "both" - or None when this turn did not say."""
+    text = this_turn()
+    if _SKIP_RE.search(text):
+        return "skip"
+    if _REPLACE_RE.search(text):
+        return "replace"
+    if _BOTH_RE.search(text):
+        return "both"
+    return None
 
 
 def asks_for_more() -> bool:
