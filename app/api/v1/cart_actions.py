@@ -1,10 +1,10 @@
 """What the shopper wants done with their bag, as one word the widget acts on.
 
-The ``action`` events carry exact instructions - these variant ids, this page -
-and only appear when the agent itself called add_to_cart or go_to_checkout. This
-is the plainer signal behind them: the shopper asked to add what they were shown,
-to check out with it, or to check out with only what is already in the bag. The
-widget holds the cards it drew, so it knows which products "these" are.
+The shopper asked to add what they were shown, to check out with it, or to check
+out with only what is already in the bag. The widget holds the cards it drew, so
+it knows which products "these" are. When the agent itself called add_to_cart or
+go_to_checkout, payload() adds its exact instructions - these variant ids, this
+page - to the same one ``actions`` event.
 
 Read off the shopper's own words first, the way the requested count is: the model
 is not relied on to report an intent it may not act on. What the agent did this
@@ -14,9 +14,16 @@ add the look to your bag?".
 
 import re
 
+from app.services.shopify_client import store_domain
+
 ADD_PREVIOUS = "add previous products in cart"
 CHECKOUT = "checkout"
 CHECKOUT_FROM_EXISTING = "checkout from existing"
+# Only ever the agent's own doing - "take me to my bag" - never read off the words.
+OPEN_CART = "open cart"
+
+# Where each word leaves the shopper; adding alone keeps them on the page.
+_PAGE = {CHECKOUT: "checkout", CHECKOUT_FROM_EXISTING: "checkout", OPEN_CART: "cart"}
 
 _CART = r"(?:cart|bag|basket|trolley)"
 _CHECKOUT_WORD = r"(?:check-?\s?out|pay(?:ment)?)"
@@ -82,21 +89,62 @@ def _clauses(text: str) -> list[str]:
     return [_NEGATED_RE.sub(" ", p) for p in parts if p and not _QUESTION_RE.search(p)]
 
 
-def cart_action(message: str, issued: list[dict] | None = None) -> str | None:
-    """ADD_PREVIOUS, CHECKOUT, CHECKOUT_FROM_EXISTING, or None when neither was asked.
+def cart_action(
+    message: str,
+    issued: list[dict] | None = None,
+    *,
+    bag_empty: bool = False,
+    waiting: bool = False,
+) -> str | None:
+    """ADD_PREVIOUS, CHECKOUT, CHECKOUT_FROM_EXISTING, OPEN_CART, or None.
 
     issued: the ``action`` dicts the agent's own tools produced this turn. Checking
     out wins over adding - "add these and checkout" is a checkout with them in it.
+    bag_empty: the widget sent a cart with nothing in it.
+    waiting: the agent's add_to_cart put nothing in and is asking a question, so
+    leaving the page now would walk out on it.
     """
+    if waiting:
+        return None
     text = " ".join((message or "").lower().replace("’", "'").split())
     clauses = _clauses(text)
     issued = issued or []
+    adding = any(_ADD_RE.search(c) for c in clauses) or any(a.get("type") == "add_to_cart" for a in issued)
 
     checkout = any(_CHECKOUT_RE.search(c) for c in clauses) or any(
         a.get("type") == "redirect" and a.get("page") == "checkout" for a in issued
     )
     if checkout:
+        # An empty bag with nothing going into it is an empty checkout page.
+        if bag_empty and (not adding or _REJECT_RE.search(text)):
+            return None
         return CHECKOUT_FROM_EXISTING if _REJECT_RE.search(text) else CHECKOUT
-    if any(_ADD_RE.search(c) for c in clauses) or any(a.get("type") == "add_to_cart" for a in issued):
+    if adding:
         return ADD_PREVIOUS
+    if any(a.get("type") == "redirect" and a.get("page") == "cart" for a in issued):
+        return OPEN_CART
     return None
+
+
+def payload(word: str | None, issued: list[dict] | None = None) -> dict | None:
+    """The ``actions`` event: the word, with the exact instructions behind it.
+
+    items - the variants the agent put in the bag this turn, as {variant_id,
+            quantity}: add exactly these first. Absent, "add previous products"
+            and "checkout" mean the products the widget showed.
+    url   - where to send the shopper once the bag is right; absent, stay put.
+    """
+    if not word:
+        return None
+    event: dict = {"action": word}
+    if word != CHECKOUT_FROM_EXISTING:
+        items = [line for a in issued or [] if a.get("type") == "add_to_cart"
+                 for line in a.get("items") or []]
+        if items:
+            event["items"] = items
+    page = _PAGE.get(word)
+    if page:
+        event["page"] = page
+        event["url"] = f"/{page}"
+        event["absolute_url"] = f"https://{store_domain()}/{page}"
+    return event

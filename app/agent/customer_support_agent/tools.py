@@ -156,7 +156,9 @@ async def get_store_policies() -> str:
 
 @tool
 async def search_store_handbook(question: str) -> str:
-    """Look up how this store works: account pages, collections, cart and checkout paths, policies.
+    """Look up how this store works: account pages, collections, policies.
+
+    Never for going to checkout or adding to the bag - go_to_checkout and add_to_cart do those.
 
     Use for "where do I find...", "how do I return...", "do you have a size guide" - anything
     about the store itself rather than a product or an order. Passages come from the store's

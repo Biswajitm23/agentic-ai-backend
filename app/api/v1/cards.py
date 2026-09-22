@@ -276,6 +276,9 @@ class CardCollector:
         # Instructions for the widget - add these variants, open checkout - in
         # the order the agent issued them.
         self.actions: list[dict] = []
+        # The last add_to_cart put nothing in - it is asking for a size, colour or
+        # which product - so the widget must not act on the bag this turn.
+        self.cart_waiting = False
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -293,6 +296,11 @@ class CardCollector:
                 action = None
             if isinstance(action, dict) and action.get("type"):
                 self.actions.append(action)
+        if tool_name == "add_to_cart":
+            try:
+                self.cart_waiting = not json.loads(output or "{}").get("done")
+            except (TypeError, ValueError, AttributeError):
+                self.cart_waiting = True
         if tool_name == "browse_category" and output:
             try:
                 found = json.loads(output)
