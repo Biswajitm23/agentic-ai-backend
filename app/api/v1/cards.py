@@ -73,8 +73,9 @@ _MENTION_RATIO = 0.5
 # and jumpers to trousers" - rather than pick a product out, even when only one
 # title there carries the word: read as names, they cut nineteen boys' pieces
 # down to the four that happened to say "jacket", "trousers" or "booties".
+# "dres" is not a typo: _stem() takes the last s off "dress" too.
 _KINDS = {
-    "dress", "shirt", "top", "blouse", "jumper", "sweater", "cardigan", "knitwear",
+    "dres", "shirt", "top", "blouse", "jumper", "sweater", "cardigan", "knitwear",
     "jacket", "coat", "trouser", "short", "skirt", "legging", "romper", "bodysuit",
     "sleepsuit", "pyjama", "nightwear", "shoe", "boot", "bootie", "sandal", "plimsoll",
     "hat", "bonnet", "cap", "hairband", "headband", "bow", "belt", "sock", "bib",
@@ -104,6 +105,37 @@ def _words(text: str) -> set[str]:
     return {s for s in stems if s not in _NOISE}
 
 
+def _tokens(text: str) -> list[str]:
+    """The reply's words in order, as _words() reads them."""
+    stems = (_stem(w) for w in _WORD_RE.findall(text.lower()) if len(w) > 2)
+    return [s for s in stems if s not in _NOISE]
+
+
+def _names_other_piece(words: set[str], own: set[str], tokens: list[str]) -> bool:
+    """Every place the reply uses this title's words, it goes on to name a
+    different kind of piece.
+
+    "Hand Smocked Peter Pan Collar Short Sleeve Dress in Burgundy" is not the
+    "... Short Sleeve Romper": the words it shares run into "dress", which the
+    romper's title does not have. With the dress missing from the tool result
+    those shared words were the romper's alone, and drew it under a reply about
+    two dresses. Only a title that says what it is can be contradicted this way.
+    """
+    if not words & _KINDS:
+        return False
+    hits = [i for i, t in enumerate(tokens) if t in own]
+    if not hits:
+        return False
+    for i in hits:
+        end = i
+        while end + 1 < len(tokens) and tokens[end + 1] in words:
+            end += 1
+        after = tokens[end + 1] if end + 1 < len(tokens) else None
+        if not (after in _KINDS and after not in words):
+            return False
+    return True
+
+
 def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None) -> list[dict]:
     """The products the reply actually talks about.
 
@@ -119,6 +151,7 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
     ignore: stems in the reply that must not count as naming anything.
     """
     said = _words(reply) - (ignore or set())
+    tokens = _tokens(reply)
     title_words = [(item, _words(item.get("title") or "")) for item in items]
 
     frequency: dict[str, int] = {}
@@ -132,7 +165,7 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
             continue
         distinctive = {w for w in words if frequency.get(w, 1) == 1}
         if distinctive:
-            if distinctive & said:
+            if distinctive & said and not _names_other_piece(words, distinctive & said, tokens):
                 kept.append(item)
         else:
             # Nothing sets this title apart, so fall back to how much of it appears -
