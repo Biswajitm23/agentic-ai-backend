@@ -98,8 +98,6 @@ def cart_action(
     waiting: a question about the bag is still open - decide() keeps the
     shopper on the page, but what already went in still goes.
     """
-    text = " ".join((message or "").lower().replace("’", "'").split())
-    clauses = _clauses(text)
     issued = issued or []
     # Changing lines already in the bag leads: an edit carries any removal and
     # any addition made beside it, and the page to go to next, if any.
@@ -109,9 +107,9 @@ def cart_action(
         return REMOVE_FROM_CART
     added = any(a.get("type") == "add_to_cart" and a.get("items") for a in issued)
 
-    checkout = any(_CHECKOUT_RE.search(c) for c in clauses) or any(
-        a.get("type") == "redirect" and a.get("page") == "checkout" for a in issued
-    )
+    # Checkout is the agent's decision - its go_to_checkout call - never the
+    # word "checkout" found in the message.
+    checkout = any(a.get("type") == "redirect" and a.get("page") == "checkout" for a in issued)
     if checkout:
         if added:
             return CHECKOUT
