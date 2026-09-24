@@ -410,9 +410,28 @@ class CardCollector:
         self.outfits: list[dict] = []
         self.orders: dict | None = None
         self.choices: dict | None = None
+        # Options the agent chose on a product for the shopper - pressed on its
+        # card by the widget, never added.
+        self.selection: dict | None = None
+        # The buttons the agent chose for its own question, from real options.
+        self.offered_choices: list[str] = []
 
     def take(self, tool_name: str, output: str | None) -> tuple[str, dict] | None:
         """Record a tool result. Returns (event_name, payload) when it had cards."""
+        if tool_name == "offer_choices":
+            try:
+                self.offered_choices = json.loads(output or "{}").get("choices") or []
+            except (TypeError, ValueError, AttributeError):
+                self.offered_choices = []
+            return None
+        if tool_name == "select_options":
+            try:
+                result = json.loads(output or "{}")
+            except (TypeError, ValueError):
+                result = {}
+            if result.get("found") and (result.get("selection") or {}).get("options"):
+                self.selection = result["selection"]
+            return None
         if output and '"action"' in output:
             try:
                 action = json.loads(output).get("action")
@@ -632,6 +651,8 @@ class CardCollector:
             out["outfit"] = self.outfit
         if self.orders is not None:
             out["orders"] = self.orders
+        if self.selection is not None:
+            out["select"] = self.selection
         if self.choices is not None:
             out["choices"] = self.choices
         if self.categories is not None:

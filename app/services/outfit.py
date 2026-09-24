@@ -536,6 +536,72 @@ _WHO = {
 SUGGESTION_LIMIT = 4
 
 
+async def option_selection(product: str, color: str = "", size: str = "") -> dict:
+    """The colour and size a shopper chose on one product - chosen, not bought.
+
+    Resolves the product the way cart_additions does and matches each value to
+    one the product really offers ("4" for "4 UK / 5 US / 20 EU"). The widget
+    presses those options on the product's card and leaves Add to cart to them.
+    Either value may be left out; only what was chosen is selected.
+    """
+    from app.services import compare
+    from app.services.shopify_storefront import collection_tree
+
+    name = " ".join(str(product or "").split())
+    if not name:
+        return {"found": False, "reason": "no_product_named"}
+    tree = await collection_tree()
+    handle = name if name in set(tree["handles"].values()) else None
+    if handle is None:
+        rivals = compare.matches(name, tree["ids"])
+        if len(rivals) > 1:
+            return {"found": False, "reason": "which_product",
+                    "which_product": [tree["titles"][tree["ids"][r]] for r in rivals[:4]]}
+        product_id, near = compare.resolve(name, tree["ids"], tree["titles"])
+        if product_id is None:
+            return {"found": False, "reason": "not_found", "did_you_mean": near}
+        handle = tree["handles"][product_id]
+    found = next(iter(await _active_products([handle])), None)
+    if found is None:
+        return {"found": False, "reason": "not_found_or_not_for_sale"}
+
+    offered = _options_of(found)
+    colour_name = next((n for n in offered if n.casefold() in ("color", "colour")), None)
+    size_name = next((n for n in offered if n.casefold() == "size"), None)
+
+    def match(values: list[str], wanted: str, said) -> str | None:
+        exact = [v for v in values if v.casefold() == wanted.casefold()]
+        loose = exact or [v for v in values if said(v, wanted.lower())]
+        return loose[0] if len(loose) == 1 else None
+
+    chosen: dict[str, str] = {}
+    not_offered: dict[str, str] = {}
+    for option, wanted, said in ((colour_name, color, shopper_words.said_colour),
+                                 (size_name, size, shopper_words.said_size)):
+        if not wanted:
+            continue
+        value = match(offered.get(option) or [], wanted, said) if option else None
+        if value:
+            chosen[option] = value
+        else:
+            not_offered[option or ("Color" if wanted is color else "Size")] = wanted
+    return {
+        "found": True,
+        "selection": {
+            "handle": handle,
+            "title": found["title"],
+            "url": product_url(found),
+            "image": product_image(found),
+            "options": chosen,
+        },
+        "selected": chosen,
+        "not_offered": not_offered,
+        "available_colors": offered.get(colour_name) or [] if colour_name else [],
+        "available_sizes": offered.get(size_name) or [] if size_name else [],
+        "in_bag": False,
+    }
+
+
 def _fits_age(sizes: list[str], age: int | None) -> bool:
     """Whether a piece comes in a size for this age. Pieces with no size run fit."""
     if age is None or not sizes:

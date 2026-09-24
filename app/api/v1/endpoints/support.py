@@ -536,7 +536,11 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # an exact value, so the next add_to_cart takes it without asking again.
         # Asked on the way to checkout, a tapped answer carries the checkout on.
         then = " and checkout" if checking_out else ""
-        chips = suggestions.choice_chips(cards.cart_choice, reply, then=then) if cards.cart_waiting else []
+        # The agent's own buttons for its own question come first: it chose them
+        # from the product's real options, so nothing here has to guess.
+        chips = suggestions.offered_chips(cards.offered_choices, then=then)
+        if not chips and cards.cart_waiting:
+            chips = suggestions.choice_chips(cards.cart_choice, reply, then=then)
         if not chips and cards.categories_listed:
             # "What categories do you have": every one of them, to tap - never collections.
             chips = suggestions.category_chips(cards.categories_listed, cards.categories_total)

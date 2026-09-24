@@ -65,7 +65,9 @@ async def check_order_status(order_number: str, email: str) -> str:
 @tool
 async def add_to_cart(items: list[dict], forget_others: bool = False, similar: str = "") -> str:
     """Put products in the shopper's bag. The storefront does the adding; this
-    finds the exact variant and tells it which.
+    finds the exact variant and tells it which. Only when they ask for it to go
+    in the bag or to buy it - choosing, selecting or picking a colour or size is
+    not that: use select_options.
 
     items: [{"product": "<name or handle>", "color": "Pink", "size": "5Y", "quantity": 1}]
       "this"/"it" is the product they are viewing. Only the color and size the
@@ -94,6 +96,42 @@ async def add_to_cart(items: list[dict], forget_others: bool = False, similar: s
         return json.dumps(await outfit.cart_additions(items, forget_others, similar), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("add_to_cart", exc)
+
+
+@tool
+async def offer_choices(choices: list[str]) -> str:
+    """The buttons under your reply, when you ask the shopper to choose - a colour,
+    a size, which product, yes or no. Call it every time you ask them to pick.
+
+    choices: exactly what they can pick, in the words to show: real values from
+      a tool result this chat ("Navy", "Beige", "Blue" from available_colors) -
+      never invented, never a colour or size the product does not come in.
+      Tapping one sends it as their message.
+    """
+    picked = [" ".join(str(c).split()) for c in choices or [] if str(c).strip()]
+    return json.dumps({"choices": list(dict.fromkeys(picked))}, ensure_ascii=False)
+
+
+@tool
+async def select_options(product: str, color: str = "", size: str = "") -> str:
+    """Choose a colour and/or size on a product FOR the shopper, without adding it -
+    "select blue", "choose size 4", "pick the first size", "select color Blue and
+    size M". The storefront presses those options on the product's card and the
+    shopper adds it themselves.
+
+    product: its name or handle; "this"/"it" is the product they are viewing.
+    color, size: the values they chose, as they said them or as you read them off
+      the product's options ("the first size" is available_sizes[0] - call once
+      without it to see them). Leave out whatever they did not choose.
+
+    Returns selected, not_offered (a value it does not come in - say so) and the
+    available_colors / available_sizes. Nothing is in the bag: never say it is.
+    Confirm in one line what is selected, and that they can add it when ready.
+    """
+    try:
+        return json.dumps(await outfit.option_selection(product, color, size), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("select_options", exc)
 
 
 @tool
@@ -602,6 +640,8 @@ async def confirm_order_change(
 
 
 CUSTOMER_SUPPORT_TOOLS = [
+    offer_choices,
+    select_options,
     search_products,
     browse_category,
     list_product_categories,
