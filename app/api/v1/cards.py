@@ -395,8 +395,10 @@ class CardCollector:
         self.bag_cards: list[dict] = []
         # Every collection, when the shopper asked to see them all: sent as chips.
         self.collections_listed: list[dict] = []
-        # Every product category, when the shopper asked to see them: sent as chips.
+        # The product categories shown, when the shopper asked to see them: sent as
+        # chips, with how many there are in all so the rest can be offered.
         self.categories_listed: list[dict] = []
+        self.categories_total = 0
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -430,9 +432,11 @@ class CardCollector:
                 self.cart_waiting, self.cart_choice = True, []
         if tool_name == "list_product_categories" and output and '"listing": "categories"' in output:
             try:
-                self.categories_listed = json.loads(output).get("categories") or []
+                listing = json.loads(output)
+                self.categories_listed = listing.get("categories") or []
+                self.categories_total = int(listing.get("count") or len(self.categories_listed))
             except (TypeError, ValueError, AttributeError):
-                self.categories_listed = []
+                self.categories_listed, self.categories_total = [], 0
             return None
         if tool_name == "get_products_by_category" and output and '"found": true' in output:
             # The list was only the way to this category; its buttons are not the answer.

@@ -327,28 +327,37 @@ async def _collection_list() -> dict:
     }
 
 
-async def _category_list() -> dict:
+async def _category_list(show: int) -> dict:
     listed = await product_categories.store_categories()
+    shown = listed if show <= 0 else listed[:show]
     return {
         "listing": "categories",
         "count": len(listed),
+        "shown": len(shown),
         "categories": [{k: c[k] for k in ("id", "name", "full_name", "product_count", "image")}
-                       for c in listed],
+                       for c in shown],
     }
 
 
 @tool
-async def list_product_categories() -> str:
-    """Every product CATEGORY the store sells in - "what categories do you have",
-    "show me all the categories", "what kinds of products do you sell". No arguments.
+async def list_product_categories(show: int) -> str:
+    """The product CATEGORIES the store sells in - "what categories do you have",
+    "show me some categories", "what kinds of products do you sell".
+
+    show: how many to show, biggest first - your call, from what they asked
+      and how the conversation is going. A general or "some" question deserves
+      a short, easy selection rather than the whole list; 0 means every one,
+      for when they want all of them (including a tap on "Explore all
+      categories"). When fewer than all are shown, an "Explore all categories"
+      button is added for the rest.
 
     These are Shopify's product categories ("Baby & Children's Dresses"), not
     collections - never answer a category question with list_collections. The
     storefront shows each one as a button to tap, so say in one line how many
-    there are and to tap one, and never list or number them yourself.
+    you are showing out of how many and to tap one, and never list or number them yourself.
     """
     try:
-        return json.dumps(await _category_list(), ensure_ascii=False)
+        return json.dumps(await _category_list(show), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("list_product_categories", exc)
 
