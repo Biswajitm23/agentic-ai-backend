@@ -448,6 +448,100 @@ def question_chips(reply: str, colours: list[str] | None = None) -> list[dict]:
     return []
 
 
+def plural(name: str) -> str:
+    """"Dress" -> "Dresses", "Shoes" -> "Shoes". Chips read as a shelf, not a SKU."""
+    lowered = name.strip().lower()
+    if lowered in _ALREADY_PLURAL:
+        return name
+    if lowered in _IRREGULAR:
+        return _IRREGULAR[lowered].title()
+    if lowered.endswith(("ss", "x", "ch", "sh")):
+        return f"{name}es"
+    # Already plural - "Dresses", "T-Shirts". Adding to it gave "Explore Dresseses".
+    if lowered.endswith("s"):
+        return name
+    return f"{name}s"
+
+
+def _category_chip(entry: dict) -> dict:
+    name = plural(entry["name"])
+    return {"label": f"Explore {name}", "prompt": f"Show me {name.lower()}",
+            "kind": "category", "id": entry.get("id")}
+
+
+def _collection_chip(entry: dict) -> dict:
+    title = entry.get("name") or entry.get("title") or ""
+    return {"label": f"Shop {title}", "prompt": f"What is in {title}?",
+            "kind": "collection", "id": entry.get("handle") or entry.get("id")}
+
+
+# ── Where the shopper is ───────────────────────────────────────────────────
+# The general shelves are the same whatever was just said - ask about Baby
+# Accessories & Gifts and the row still offered Dresses and Shirts. So the row
+# starts from where the shopper is: the shelves of the products this reply
+# showed, then their neighbours under the same broad collection. A bib leads to
+# Bibs, Teddy Bears, Socks, Belts and Sunglasses.
+
+CONTEXT_LIMIT = 5
+
+
+def _explore_chip(card: dict) -> dict:
+    title = card.get("title") or card.get("name") or ""
+    return {"label": f"Explore {title}", "prompt": f"What is in {title}?",
+            "kind": "collection", "id": card.get("handle") or card.get("id")}
+
+
+async def _context_chips(shown_products: list[dict], shown_category: dict | None) -> list[dict]:
+    """Shelves around what the shopper is looking at, nearest first, or []."""
+    tree = await shopify_storefront.collection_tree()
+    handles: list[str] = []
+
+    def add(handle: str | None) -> None:
+        if handle and handle in tree["cards"] and handle not in handles:
+            handles.append(handle)
+
+    def neighbours(product_type: str) -> list[str]:
+        return tree["children"].get(tree["parent"].get(product_type), [])
+
+    def shelf(product_type: str) -> str | None:
+        # Romper has no collection of its own, only Bodysuits & Rompers.
+        return tree["home"].get(product_type) or tree["parent"].get(product_type)
+
+    # 1. The products this reply showed: each one's own shelf, then its neighbours.
+    types: list[str] = []
+    for product in shown_products:
+        found = (tree["type_of"].get(str(product.get("product_id") or ""))
+                 or tree["type_of"].get((product.get("title") or "").strip().lower()))
+        if found and found not in types:
+            types.append(found)
+    for t in types:
+        add(shelf(t))
+    for t in types:
+        for handle in neighbours(t):
+            add(handle)
+
+    # 2. A collection or category the shopper named: what sits under it, or beside it.
+    standing_in = None
+    if shown_category:
+        ident = shown_category.get("id")
+        if shown_category.get("kind") == "collection" and ident:
+            standing_in = ident
+            if ident in tree["children"]:
+                for handle in tree["children"][ident]:
+                    add(handle)
+            elif ident in tree["collection_type"]:
+                for handle in neighbours(tree["collection_type"][ident]):
+                    add(handle)
+        elif shown_category.get("name"):
+            named = shown_category["name"]
+            standing_in = tree["home"].get(named)
+            for handle in neighbours(named):
+                add(handle)
+
+    # The shelf they are already standing on is not a suggestion.
+    return [_explore_chip(tree["cards"][h]) for h in handles if h != standing_in][:CONTEXT_LIMIT]
+
+
 async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTIONS,
                    reply: str = "", shown_products: list[dict] | None = None) -> list[dict]:
     """Chips to offer after a reply, most relevant first.
