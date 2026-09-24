@@ -537,6 +537,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # Asked on the way to checkout, a tapped answer carries the checkout on.
         then = " and checkout" if checking_out else ""
         chips = suggestions.choice_chips(cards.cart_choice, reply, then=then) if cards.cart_waiting else []
+        if not chips and cards.categories_listed:
+            # "What categories do you have": every one of them, to tap - never collections.
+            chips = suggestions.category_chips(cards.categories_listed)
         if not chips and not cards.collections_listed and shopify_storefront.asks_for_collection_list(req.message):
             # They asked for the collections, whichever tool the agent reached for.
             try:

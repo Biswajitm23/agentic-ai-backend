@@ -13,6 +13,7 @@ import re
 CARD_TOOLS = {
     "search_products": "products",
     "browse_category": "products",
+    "get_products_by_category": "products",
     "get_best_sellers": "products",
     "browse_catalogue": "products",
     "suggest_pieces": "products",
@@ -36,6 +37,10 @@ MAX_CARDS = 12
 # it is sent whole - trimming it to the few products the reply names would empty
 # a grid the shopper explicitly asked to see.
 WHOLE_RESULT_TOOLS = {"browse_category"}
+
+# Tools whose every product is sent, past MAX_CARDS: a tapped product category
+# is the shopper asking to see all of it, and thirteen dresses is thirteen cards.
+ALL_RESULT_TOOLS = {"get_products_by_category"}
 
 # Tools that change the bag: where their result keeps what changed, what kind
 # of change it is, and how the cards are headed.
@@ -360,6 +365,8 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
     # Cardigans" above a set of recommendations.
     if data.get("heading"):
         result["heading"] = data["heading"]
+    if tool_name in ALL_RESULT_TOOLS and data.get("category"):
+        result["group"] = data["category"]
     return result
 
 
@@ -374,6 +381,7 @@ class CardCollector:
         self.products: dict | None = None
         self.products_whole = False
         self.products_fixed = False
+        self.products_all = False
         # Instructions for the widget - add these variants, open checkout - in
         # the order the agent issued them.
         self.actions: list[dict] = []
@@ -387,6 +395,8 @@ class CardCollector:
         self.bag_cards: list[dict] = []
         # Every collection, when the shopper asked to see them all: sent as chips.
         self.collections_listed: list[dict] = []
+        # Every product category, when the shopper asked to see them: sent as chips.
+        self.categories_listed: list[dict] = []
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -418,6 +428,15 @@ class CardCollector:
                 self.cart_choice = result.get("needs_choice") or []
             except (TypeError, ValueError, AttributeError):
                 self.cart_waiting, self.cart_choice = True, []
+        if tool_name == "list_product_categories" and output and '"listing": "categories"' in output:
+            try:
+                self.categories_listed = json.loads(output).get("categories") or []
+            except (TypeError, ValueError, AttributeError):
+                self.categories_listed = []
+            return None
+        if tool_name == "get_products_by_category" and output and '"found": true' in output:
+            # The list was only the way to this category; its buttons are not the answer.
+            self.categories_listed = []
         if tool_name in ("list_collections", "browse_category") and output and '"listing": "collections"' in output:
             try:
                 self.collections_listed = json.loads(output).get("collections") or []
@@ -442,6 +461,7 @@ class CardCollector:
             # Set per result, so a later ordinary search still gets reconciled.
             self.products_whole = tool_name in WHOLE_RESULT_TOOLS
             self.products_fixed = tool_name in FIXED_RESULT_TOOLS
+            self.products_all = tool_name in ALL_RESULT_TOOLS
         if name == "outfit":
             self.outfits.append(cards)
         if tool_name in BAG_TOOLS:
@@ -545,7 +565,7 @@ class CardCollector:
             return
         # Choices are never reconciled against the wording: the whole point is
         # that they do not depend on what the agent chose to say.
-        if self.products is None or self.products_fixed:
+        if self.products is None or self.products_fixed or self.products_all:
             return
         items = self.products.get("items") or []
         kept = keep_mentioned(items, _without_choices(reply),
@@ -601,7 +621,7 @@ class CardCollector:
         if self.products is not None:
             items = self.products.get("items") or []
             out["products"] = ({**self.products, "items": items[:MAX_CARDS]}
-                               if len(items) > MAX_CARDS else self.products)
+                               if len(items) > MAX_CARDS and not self.products_all else self.products)
         if self.outfit is not None:
             out["outfit"] = self.outfit
         if self.orders is not None:

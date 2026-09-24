@@ -1434,7 +1434,7 @@ async def _audience_shelf(audience: str, asked: str, limit: int) -> dict | None:
 # "what categories do you have" are caught while "Winter Collection" - a real
 # collection's name - is not.
 _SHELF_LIST_WORDS = {
-    "collection", "collections", "category", "categories", "section", "sections",
+    "collection", "collections", "section", "sections",
     "department", "departments", "range", "ranges", "everything",
 }
 _ASKING_WORDS = {

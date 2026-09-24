@@ -91,6 +91,8 @@ class Settings(BaseSettings):
 
     # Categories are grouped from the live catalogue, which barely moves.
     SUPPORT_CATEGORY_CACHE_MINUTES: int = 30
+    # Shopify taxonomy categories ("Baby & Children's Dresses"), from every active product.
+    SUPPORT_PRODUCT_CATEGORY_CACHE_MINUTES: int = 12
 
     # Shopify (New Shop)
     SHOPIFY_CLIENT_ID: str = ""

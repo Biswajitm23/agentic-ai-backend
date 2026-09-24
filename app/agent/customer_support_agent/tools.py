@@ -16,7 +16,8 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.services import cart_removal, compare, handbook, order_changes, outfit, shopify_storefront, store_profile
+from app.services import (cart_removal, compare, handbook, order_changes, outfit, product_categories,
+                          shopify_storefront, store_profile)
 from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError, store_domain
 
@@ -326,10 +327,59 @@ async def _collection_list() -> dict:
     }
 
 
+async def _category_list() -> dict:
+    listed = await product_categories.store_categories()
+    return {
+        "listing": "categories",
+        "count": len(listed),
+        "categories": [{k: c[k] for k in ("id", "name", "full_name", "product_count", "image")}
+                       for c in listed],
+    }
+
+
+@tool
+async def list_product_categories() -> str:
+    """Every product CATEGORY the store sells in - "what categories do you have",
+    "show me all the categories", "what kinds of products do you sell". No arguments.
+
+    These are Shopify's product categories ("Baby & Children's Dresses"), not
+    collections - never answer a category question with list_collections. The
+    storefront shows each one as a button to tap, so say in one line how many
+    there are and to tap one, and never list or number them yourself.
+    """
+    try:
+        return json.dumps(await _category_list(), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("list_product_categories", exc)
+
+
+@tool
+async def get_products_by_category(categories: list[str]) -> str:
+    """Every product in one or more product CATEGORIES - "Show me Shirts", "show me
+    dresses", or a category button the shopper tapped.
+
+    categories: exact category names or ids from list_product_categories, e.g.
+      ["Baby & Children's Dresses"]. You choose which categories the shopper
+      means - "dresses" is "Baby & Children's Dresses", "t-shirts" is "T-Shirts"
+      and not "Shirts". Pass several to cover them all at once.
+
+    The storefront draws every product under the category name. found=false
+    means a name was not an exact category: it hands back every category -
+    pick the right one(s) and call again, or try browse_category if none fit.
+    """
+    try:
+        if isinstance(categories, str):
+            categories = [categories]
+        return json.dumps(await product_categories.products_in(categories), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("get_products_by_category", exc)
+
+
 @tool
 async def list_collections() -> str:
-    """Every collection the store has - "show me all your collections", "what
-    categories do you have", "what sections are there". No arguments.
+    """Every COLLECTION the store has - "show me all your collections", "what
+    collections do you have". No arguments. Only when they say "collection":
+    a question about categories goes to list_product_categories.
 
     The storefront shows each one as a button to tap, so say in one line that
     here they are, and never list or number them yourself.
@@ -342,17 +392,17 @@ async def list_collections() -> str:
 
 @tool
 async def browse_category(category: str) -> str:
-    """Every product in ONE category the shopper named or tapped.
+    """Every product in ONE collection or shelf the shopper named or tapped.
 
-    category: what they actually gave you - a name like "Dress" or "Grace
-      Collection", or the id a category tile sent back. Plurals are fine
-      ("dresses"), and both kinds of tile - product types and collections - land
-      on the right products.
+    category: what they actually gave you - a name like "Grace Collection", or
+      the id a collection tile sent back. Plurals are fine, and both kinds of
+      tile - product types and collections - land on the right products.
 
-    Use this whenever a shopper wants a category rather than one named product:
-    "show me dresses", "what is in Winter Luxe", or a bare category name arriving
-    on its own. Prefer it over search_products for a category - it returns the
-    whole category, in stock, rather than a keyword guess.
+    Use this for a collection ("what is in Winter Luxe"), a collection button,
+    or a kind of product get_products_by_category found nothing for. A product
+    category ("show me dresses", "Show me Shirts") goes to get_products_by_category
+    first. Prefer either over search_products for a shelf - it returns the whole
+    shelf, in stock, rather than a keyword guess.
 
     Who it is for is a shelf too: "girls", "for my son", "baby", "products for
     girls" return every piece tagged for them (kind "audience"; count is how many
@@ -543,6 +593,8 @@ async def confirm_order_change(
 CUSTOMER_SUPPORT_TOOLS = [
     search_products,
     browse_category,
+    list_product_categories,
+    get_products_by_category,
     list_collections,
     get_best_sellers,
     suggest_pieces,

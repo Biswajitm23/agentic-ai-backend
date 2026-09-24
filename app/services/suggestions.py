@@ -185,6 +185,16 @@ def collection_chips(collections: list[dict]) -> list[dict]:
              "id": c.get("handle")} for c in collections if c.get("title")]
 
 
+def category_chips(categories: list[dict]) -> list[dict]:
+    """Every product category as a chip - the answer to "what categories do you have".
+
+    All of them, biggest first. Tapping one asks for it by name, which
+    get_products_by_category answers.
+    """
+    return [{"label": f'{c["name"]} ({c["product_count"]})', "prompt": f'Show me {c["name"]}'}
+            for c in categories if c.get("name")]
+
+
 def _title_forms(title: str) -> list[str]:
     """How a reply shortens a title, longest first: "George Check Long Sleeve Shirt
     in Blue (12mths-10yrs)" is written "the George Check Long Sleeve Shirt"."""
