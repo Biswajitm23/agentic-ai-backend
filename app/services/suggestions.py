@@ -185,14 +185,20 @@ def collection_chips(collections: list[dict]) -> list[dict]:
              "id": c.get("handle")} for c in collections if c.get("title")]
 
 
-def category_chips(categories: list[dict]) -> list[dict]:
-    """Every product category as a chip - the answer to "what categories do you have".
+def category_chips(categories: list[dict], total: int = 0) -> list[dict]:
+    """The product categories as chips - the answer to "what categories do you have".
 
-    All of them, biggest first. Tapping one asks for it by name, which
-    get_products_by_category answers.
+    Biggest first. Tapping one asks for it by name, which get_products_by_category
+    answers; ``keep`` tells the widget to leave the row on screen so the shopper
+    can go back and pick another. When only some were shown, a last chip offers
+    the rest.
     """
-    return [{"label": f'{c["name"]} ({c["product_count"]})', "prompt": f'Show me {c["name"]}'}
-            for c in categories if c.get("name")]
+    chips = [{"label": f'{c["name"]} ({c["product_count"]})', "prompt": f'Show me {c["name"]}',
+              "keep": True}
+             for c in categories if c.get("name")]
+    if chips and total > len(chips):
+        chips.append({"label": f"Explore all {total} categories", "prompt": "Show me all the categories"})
+    return chips
 
 
 def _title_forms(title: str) -> list[str]:
