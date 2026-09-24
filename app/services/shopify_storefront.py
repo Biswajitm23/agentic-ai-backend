@@ -991,7 +991,9 @@ def minor_to_major(value) -> float | None:
 # All four have to reach the same products, so the reference is resolved here
 # rather than in the tool, and the caller never has to know which kind it was.
 
-CATEGORY_PRODUCT_LIMIT = 24    # most products one category may return
+# Most products one category may return - the whole shelf, as the audience scan
+# already reads, so "30 pieces in all" is followed by thirty cards, not twelve.
+CATEGORY_PRODUCT_LIMIT = 100
 CATEGORY_SUGGESTIONS = 12      # categories offered back when the name misses
 
 _DIGITS_RE = re.compile(r"^\d+$")

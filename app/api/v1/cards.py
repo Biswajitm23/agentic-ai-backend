@@ -624,8 +624,10 @@ class CardCollector:
         out: dict = {}
         if self.products is not None:
             items = self.products.get("items") or []
-            out["products"] = ({**self.products, "items": items[:MAX_CARDS]}
-                               if len(items) > MAX_CARDS and not self.products_all else self.products)
+            # A whole shelf or category goes whole: the reply says "30 pieces in
+            # all", and the widget folds the rest under "Show N more" itself.
+            capped = len(items) > MAX_CARDS and not (self.products_all or self.products_whole)
+            out["products"] = {**self.products, "items": items[:MAX_CARDS]} if capped else self.products
         if self.outfit is not None:
             out["outfit"] = self.outfit
         if self.orders is not None:

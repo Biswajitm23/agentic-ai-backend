@@ -433,7 +433,9 @@ async def browse_category(category: str) -> str:
         if shopify_storefront.asks_for_collection_list(category):
             return json.dumps(await _collection_list(), ensure_ascii=False)
         return json.dumps(
-            await shopify_storefront.category_products(category), ensure_ascii=False
+            await shopify_storefront.category_products(
+                category, shopify_storefront.CATEGORY_PRODUCT_LIMIT),
+            ensure_ascii=False
         )
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("browse_category", exc)
