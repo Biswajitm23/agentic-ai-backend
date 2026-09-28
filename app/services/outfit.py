@@ -148,8 +148,27 @@ def _suits(tags: list[str] | None) -> list[str]:
     return [name for name in AUDIENCE_TAGS if name.lower() in lowered]
 
 
-async def browse_catalogue() -> dict:
-    """Everything a shopper can buy, grouped by category so a look can be composed."""
+def _colour_variants(node: dict) -> dict[str, dict]:
+    """Each colour's own variant and photo - the first in stock, else the first."""
+    found: dict[str, dict] = {}
+    for variant in node["variants"]["nodes"]:
+        colour = _colour_of(variant)
+        if not colour:
+            continue
+        if colour not in found or (variant["availableForSale"] and not found[colour]["in_stock"]):
+            found[colour] = {"variant_id": variant.get("legacyResourceId"),
+                             "image": variant_image(variant) or product_image(node),
+                             "in_stock": variant["availableForSale"]}
+    return found
+
+
+async def browse_catalogue(colour_variants: bool = False) -> dict:
+    """Everything a shopper can buy, grouped by category so a look can be composed.
+
+    colour_variants: also each colour's own variant and photo, for a card that
+    should open in the colour the shopper asked for. Off for the agent's own
+    browse, which has no use for them and pays for every token.
+    """
     currency = (await shop_info())["currency"]
     products = []
     for node in await _active_products():
@@ -158,6 +177,7 @@ async def browse_catalogue() -> dict:
         options = _options_of(node)
         products.append(
             {
+                **({"colour_variants": _colour_variants(node)} if colour_variants else {}),
                 "handle": node["handle"],
                 "product_id": node.get("legacyResourceId"),
                 "title": node["title"],
@@ -643,7 +663,7 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
     gets something to look at. One piece per category, so the row reads as the
     start of an outfit rather than four versions of the same shirt.
     """
-    catalogue = await browse_catalogue()
+    catalogue = await browse_catalogue(colour_variants=True)
     audience = _WHO.get((for_who or "").strip().lower())
     wanted = (colour or "").strip().lower()
     age = int(age) if age else None
@@ -680,6 +700,20 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
             break
 
     still_to_ask = [name for name, have in (("age", age), ("budget", budget)) if not have]
+
+    def in_their_colour(p: dict) -> dict:
+        """The card in the colour they asked for: that colour's photo, its variant
+        behind the link, and the colour itself for the card to open on. A jacket
+        that also comes in brown showed its first variant - blue - to someone
+        who had just said brown."""
+        matched = _colour_match(p["colors"], wanted) if wanted else None
+        own = (p.get("colour_variants") or {}).get(matched) if matched else None
+        if not own or not own.get("variant_id"):
+            return {"image": p["image"], "url": p["url"]}
+        joiner = "&" if "?" in (p["url"] or "") else "?"
+        return {"image": own["image"] or p["image"], "variant_id": own["variant_id"],
+                "color": matched, "url": f'{p["url"]}{joiner}variant={own["variant_id"]}' if p["url"] else None}
+
     return {
         "currency": catalogue["currency"],
         "known": {"for": audience, "colour": colour or None, "occasion": occasion or None,
@@ -698,8 +732,7 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
                 "colour": _colour_match(p["colors"], wanted) if wanted else None,
                 "colors": p["colors"],
                 "sizes": p["sizes"],
-                "image": p["image"],
-                "url": p["url"],
+                **in_their_colour(p),
             }
             for p in picked
         ],

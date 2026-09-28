@@ -242,6 +242,8 @@ def _card(item: dict) -> dict:
         "currency": item.get("currency"),
         "image": item.get("image"),
         "url": item.get("url"),
+        # The colour the card opens on, when the shopper asked for one.
+        "color": item.get("color"),
         # Only recommendations set this; it is why the product was suggested.
         "because": item.get("because"),
     }

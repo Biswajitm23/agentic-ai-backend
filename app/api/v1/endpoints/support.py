@@ -327,7 +327,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  product_count
       products- {items[], currency}               product cards to render: each has
                                                  product_id, variant_id, title, option,
-                                                 price, image and url
+                                                 price, image and url; color when the
+                                                 shopper asked for one - open the card
+                                                 on that colour, its photo already is
       outfit  - {items[], currency, total,        a complete look: the same cards plus
                  budget, within_budget,           the exact total and the variants to
                  cart_items[], alternatives?[]}   add to the bag; alternatives are the
