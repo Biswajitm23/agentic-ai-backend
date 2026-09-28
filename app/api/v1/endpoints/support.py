@@ -358,9 +358,22 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  and colour the shopper chose - never
                                                  add the shown products on your own.
                                                  url: where to go afterwards
+      select  - {handle, title, url, image,      options the agent chose on one
+                 options}                        product for the shopper ("select
+                                                 size 1M"): options is {option name:
+                                                 value}, e.g. {"Size": "1M"}. Press
+                                                 them on that product's card - nothing
+                                                 goes in the bag
+      suggestions - {suggestions[]}              buttons under the reply, each
+                                                 {label, prompt, kind, keep?}: tapping
+                                                 one sends prompt as the shopper's
+                                                 message. keep=true: a list to browse
+                                                 (every category) - leave the row up
+                                                 after a tap
       done    - {"session_id", "reply",          the finished reply, repeating
-                 products?, outfit?,             whatever cards were produced and
-                 greeting?, collections?,        the `actions` event
+                 products?, outfit?, orders?,    whatever cards were produced and
+                 select?, suggestions?, cart?,   the `actions` event
+                 greeting?, collections?,
                  actions?}
       error   - {"message"}                      the turn failed; nothing was saved
     """
@@ -371,6 +384,21 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     if _is_greeting(req.message):
         store = await _store_briefing(req.customer)
         briefing = f"{briefing}\n\n{store}" if briefing else store
+    # What this chat last showed, beside the page they are browsing. Left to the
+    # transcript, the page line won: "select size 1M" under the bodysuit the
+    # chat had just shown went to the dress whose page was open. The model
+    # still decides which one they mean - it now sees both.
+    if req.message.strip():
+        try:
+            last_shown = [p.get("title") for p in await shown_products.recall(session_id) if p.get("title")]
+        except Exception:  # noqa: BLE001 - a lost note is a plainer answer, not a failure
+            logger.warning("Could not recall shown products for %s", session_id, exc_info=True)
+            last_shown = []
+        if last_shown:
+            note = ("[Last shown in this chat: " + "; ".join(last_shown[:6]) +
+                    ". An unnamed product - \"this\", \"it\", \"select size ...\" - means one of these, "
+                    "not the page they are browsing]")
+            briefing = f"{briefing}\n\n{note}" if briefing else note
     # Told outright rather than left for the model to count off the message: it
     # was reading "2 jackets" and still showing the shelf.
     requested = _requested_count(req.message)

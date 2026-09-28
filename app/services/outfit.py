@@ -576,15 +576,16 @@ async def option_selection(product: str, color: str = "", size: str = "") -> dic
 
     chosen: dict[str, str] = {}
     not_offered: dict[str, str] = {}
-    for option, wanted, said in ((colour_name, color, shopper_words.said_colour),
-                                 (size_name, size, shopper_words.said_size)):
+    # (the store's own option name, what to call it if the product has none, the ask)
+    for option, label, wanted, said in ((colour_name, "Color", color, shopper_words.said_colour),
+                                        (size_name, "Size", size, shopper_words.said_size)):
         if not wanted:
             continue
         value = match(offered.get(option) or [], wanted, said) if option else None
         if value:
             chosen[option] = value
         else:
-            not_offered[option or ("Color" if wanted is color else "Size")] = wanted
+            not_offered[option or label] = wanted
     return {
         "found": True,
         "selection": {
@@ -596,9 +597,8 @@ async def option_selection(product: str, color: str = "", size: str = "") -> dic
         },
         "selected": chosen,
         "not_offered": not_offered,
-        "available_colors": offered.get(colour_name) or [] if colour_name else [],
-        "available_sizes": offered.get(size_name) or [] if size_name else [],
-        "in_bag": False,
+        "available_colors": (offered.get(colour_name) or []) if colour_name else [],
+        "available_sizes": (offered.get(size_name) or []) if size_name else [],
     }
 
 

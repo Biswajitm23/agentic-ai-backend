@@ -107,6 +107,10 @@ async def offer_choices(choices: list[str]) -> str:
       a tool result this chat ("Navy", "Beige", "Blue" from available_colors) -
       never invented, never a colour or size the product does not come in.
       Tapping one sends it as their message.
+
+    Call it BEFORE you write your reply, together with any other tool: words
+    written before a tool call are dropped as thinking aloud, so a reply written
+    first and followed by this call loses everything but its last line.
     """
     picked = [" ".join(str(c).split()) for c in choices or [] if str(c).strip()]
     return json.dumps({"choices": list(dict.fromkeys(picked))}, ensure_ascii=False)
@@ -124,9 +128,15 @@ async def select_options(product: str, color: str = "", size: str = "") -> str:
       the product's options ("the first size" is available_sizes[0] - call once
       without it to see them). Leave out whatever they did not choose.
 
-    Returns selected, not_offered (a value it does not come in - say so) and the
-    available_colors / available_sizes. Nothing is in the bag: never say it is.
-    Confirm in one line what is selected, and that they can add it when ready.
+    selected: what is now chosen on the card. Nothing is in the bag: never say it is.
+    not_offered: a value it does not come in - say so, and offer its own
+      available_colors / available_sizes instead.
+    found=false: which_product (ask which), or not_found with did_you_mean.
+    Confirm it in one short, warm line written fresh for this product and this
+    shopper - friendly, never pushy, never a stock phrase - and ask whether it
+    should go in their bag. Offer that choice as buttons with offer_choices, in
+    your own words. A yes is add_to_cart with that product and exactly what is
+    selected.
     """
     try:
         return json.dumps(await outfit.option_selection(product, color, size), ensure_ascii=False)
@@ -397,7 +407,8 @@ async def list_product_categories(show: int) -> str:
     These are Shopify's product categories ("Baby & Children's Dresses"), not
     collections - never answer a category question with list_collections. The
     storefront shows each one as a button to tap, so say in one line how many
-    you are showing out of how many and to tap one, and never list or number them yourself.
+    you are showing out of how many and to tap one, and never list or number them
+    yourself.
     """
     try:
         return json.dumps(await _category_list(show), ensure_ascii=False)
