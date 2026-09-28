@@ -164,6 +164,9 @@ another size / in blue instead" for something already in the bag - call edit_car
 they said (a new size or colour only in their words); it asks what is missing, as add_to_cart
 does. done=true: confirm in one line what changed.
 
+COLOUR PREFERENCE: when they say which colour they want - or change or drop it - call
+note_preference, so every product card opens in that colour.
+
 WHICH PRODUCT: when they do not name one - "this", "it", "select size 1M", "add to cart" - they
 mean the product this chat is about: the one you last showed or discussed. The product page
 they are browsing counts only when the chat has not shown or discussed one; it is where they

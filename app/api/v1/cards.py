@@ -415,6 +415,8 @@ class CardCollector:
         # Options the agent chose on a product for the shopper - pressed on its
         # card by the widget, never added.
         self.selection: dict | None = None
+        # The colour the shopper wants, when the agent noted one this turn.
+        self.preference: str | None = None
         # The buttons the agent chose for its own question, from real options.
         self.offered_choices: list[str] = []
 
@@ -425,6 +427,12 @@ class CardCollector:
                 self.offered_choices = json.loads(output or "{}").get("choices") or []
             except (TypeError, ValueError, AttributeError):
                 self.offered_choices = []
+            return None
+        if tool_name == "note_preference":
+            try:
+                self.preference = str(json.loads(output or "{}").get("colour") or "")
+            except (TypeError, ValueError, AttributeError):
+                self.preference = None
             return None
         if tool_name == "select_options":
             try:
@@ -655,6 +663,8 @@ class CardCollector:
             out["orders"] = self.orders
         if self.selection is not None:
             out["select"] = self.selection
+        if self.preference is not None:
+            out["preference"] = {"colour": self.preference}
         if self.choices is not None:
             out["choices"] = self.choices
         if self.categories is not None:

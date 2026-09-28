@@ -117,6 +117,22 @@ async def offer_choices(choices: list[str]) -> str:
 
 
 @tool
+async def note_preference(colour: str) -> str:
+    """Remember the colour the shopper wants, for every product shown from now on -
+    "I want brown", "in pink please", "my colour preference is navy". Call it the
+    moment they state or change one; "" when they drop it ("any colour is fine").
+
+    colour: the colour as they want it, e.g. "Brown". Every card for a product
+      that comes in it then opens on that colour - its photo, its variant
+      selected. Products that do not come in it are shown as they are.
+    It applies to cards shown from now on - cards already on screen keep their
+    colour, so to show them in the new one, show them again this turn.
+    Call it alongside whatever else you do this turn; it changes nothing else.
+    """
+    return json.dumps({"colour": " ".join(str(colour or "").split())}, ensure_ascii=False)
+
+
+@tool
 async def select_options(product: str, color: str = "", size: str = "") -> str:
     """Choose a colour and/or size on a product FOR the shopper, without adding it -
     "select blue", "choose size 4", "pick the first size", "select color Blue and
@@ -659,6 +675,7 @@ async def confirm_order_change(
 
 
 CUSTOMER_SUPPORT_TOOLS = [
+    note_preference,
     offer_choices,
     select_options,
     search_products,

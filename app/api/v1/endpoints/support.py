@@ -360,6 +360,10 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  and colour the shopper chose - never
                                                  add the shown products on your own.
                                                  url: where to go afterwards
+      preference - {colour}                      the colour the shopper wants, noted by
+                                                 the agent: open every product card that
+                                                 comes in it on that colour, from now on;
+                                                 "" clears it
       select  - {handle, title, url, image,      options the agent chose on one
                  options}                        product for the shopper ("select
                                                  size 1M"): options is {option name:
@@ -375,7 +379,8 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
       done    - {"session_id", "reply",          the finished reply, repeating
                  products?, outfit?, orders?,    whatever cards were produced and
                  select?, suggestions?, cart?,   the `actions` event
-                 greeting?, collections?,
+                 preference?, greeting?,
+                 collections?,
                  actions?}
       error   - {"message"}                      the turn failed; nothing was saved
     """
