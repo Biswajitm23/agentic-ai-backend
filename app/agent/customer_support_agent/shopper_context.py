@@ -89,7 +89,9 @@ def describe(
     if context:
         where = context.template or "a page"
         if context.viewing_product:
-            lines.append(f'Looking at: the product page for "{context.viewing_product}"')
+            lines.append(f'Looking at: the product page for "{context.viewing_product}" '
+                         '(where they are browsing - a product this chat showed or discussed '
+                         'comes first for "this" / "it")')
         elif context.template:
             lines.append(f"Looking at: the {where} page")
         shown_in = context.currency or (customer.currency if customer else None)

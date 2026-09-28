@@ -70,7 +70,7 @@ async def add_to_cart(items: list[dict], forget_others: bool = False, similar: s
     not that: use select_options.
 
     items: [{"product": "<name or handle>", "color": "Pink", "size": "5Y", "quantity": 1}]
-      "this"/"it" is the product they are viewing. Only the color and size the
+      "this"/"it" is the product the chat is about. Only the color and size the
       shopper said themselves - it checks their words, and anything else comes
       back unconfirmed. build_outfit's cart_items ([{"variant_id", "quantity"}])
       are checked the same way.
@@ -119,7 +119,7 @@ async def select_options(product: str, color: str = "", size: str = "") -> str:
     size M". The storefront presses those options on the product's card and the
     shopper adds it themselves.
 
-    product: its name or handle; "this"/"it" is the product they are viewing.
+    product: its name or handle; "this"/"it" is the product the chat is about.
     color, size: the values they chose, as they said them or as you read them off
       the product's options ("the first size" is available_sizes[0] - call once
       without it to see them). Leave out whatever they did not choose.
@@ -143,7 +143,7 @@ async def remove_from_cart(items: list[dict]) -> str:
     items: [{"product": "<name as they said it>", "color": "Pink", "size": "5Y",
       "quantity": 1}] - color and size only when they said one, quantity only when
       they said how many (otherwise the whole line goes). "this"/"it" is the
-      product they are viewing. {"product": "everything"} empties the bag.
+      product the chat is about. {"product": "everything"} empties the bag.
     done=true: confirm in one line what came out.
     needs_choice: NOTHING was removed - more than one line in their bag answers
       to that name (in_cart lists them): ask which, then call again.
@@ -162,13 +162,18 @@ async def edit_cart(items: list[dict]) -> str:
     "change it to blue". The storefront does the changing; this finds the exact
     line in their bag and what it becomes.
 
+    Only for a piece they mean IN THEIR BAG. "Select size 1M" / "choose blue"
+    about a product the chat is showing is select_options - even when something
+    else is in the bag. A size a product does not come in is never a reason to
+    change a different product's size.
+
     items: [{"product": "<name as in their bag>", "color"/"size": only to pick
       between two lines of it, "quantity": <how many they want afterwards>,
       "change_by": -1 or 2 for "one less" / "two more", "new_color": "Blue",
       "new_size": "5Y", "what": "quantity" | "size" | "color"}]
       Give what they said and nothing more: a new size or colour only in their
       words. "what" says which they want to change when they did not say to what.
-      "this"/"it" is the product they are viewing. To take a line out entirely,
+      "this"/"it" is the product the chat is about. To take a line out entirely,
       use remove_from_cart.
     done=true: confirm in one line what changed.
     needs_choice: NOTHING changed - ask for just what it lists as missing:
