@@ -126,7 +126,10 @@ async def select_options(product: str, color: str = "", size: str = "") -> str:
     product: its name or handle; "this"/"it" is the product the chat is about.
     color, size: the values they chose, as they said them or as you read them off
       the product's options ("the first size" is available_sizes[0] - call once
-      without it to see them). Leave out whatever they did not choose.
+      without it to see them). Pass everything that should now be chosen on THIS
+      product, the earlier choice too - the card shows exactly what you send, so
+      never say something is chosen that you did not send. Leave out what they
+      have not chosen.
 
     selected: what is now chosen on the card. Nothing is in the bag: never say it is.
     not_offered: a value it does not come in - say so, and offer its own

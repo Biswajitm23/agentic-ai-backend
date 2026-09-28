@@ -552,6 +552,11 @@ async def option_selection(product: str, color: str = "", size: str = "") -> dic
         return {"found": False, "reason": "no_product_named"}
     tree = await collection_tree()
     handle = name if name in set(tree["handles"].values()) else None
+    # The exact title first, as cart_additions does: "Catherine ... Trapeze Dress"
+    # is its own product, not a near miss of "... Trapeze Dress in Pink".
+    exact = tree["ids"].get(" ".join(name.lower().split()))
+    if handle is None and exact is not None:
+        handle = tree["handles"][exact]
     if handle is None:
         rivals = compare.matches(name, tree["ids"])
         if len(rivals) > 1:
