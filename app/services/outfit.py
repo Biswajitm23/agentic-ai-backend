@@ -148,27 +148,8 @@ def _suits(tags: list[str] | None) -> list[str]:
     return [name for name in AUDIENCE_TAGS if name.lower() in lowered]
 
 
-def _colour_variants(node: dict) -> dict[str, dict]:
-    """Each colour's own variant and photo - the first in stock, else the first."""
-    found: dict[str, dict] = {}
-    for variant in node["variants"]["nodes"]:
-        colour = _colour_of(variant)
-        if not colour:
-            continue
-        if colour not in found or (variant["availableForSale"] and not found[colour]["in_stock"]):
-            found[colour] = {"variant_id": variant.get("legacyResourceId"),
-                             "image": variant_image(variant) or product_image(node),
-                             "in_stock": variant["availableForSale"]}
-    return found
-
-
-async def browse_catalogue(colour_variants: bool = False) -> dict:
-    """Everything a shopper can buy, grouped by category so a look can be composed.
-
-    colour_variants: also each colour's own variant and photo, for a card that
-    should open in the colour the shopper asked for. Off for the agent's own
-    browse, which has no use for them and pays for every token.
-    """
+async def browse_catalogue() -> dict:
+    """Everything a shopper can buy, grouped by category so a look can be composed."""
     currency = (await shop_info())["currency"]
     products = []
     for node in await _active_products():
@@ -177,7 +158,6 @@ async def browse_catalogue(colour_variants: bool = False) -> dict:
         options = _options_of(node)
         products.append(
             {
-                **({"colour_variants": _colour_variants(node)} if colour_variants else {}),
                 "handle": node["handle"],
                 "product_id": node.get("legacyResourceId"),
                 "title": node["title"],
@@ -556,77 +536,6 @@ _WHO = {
 SUGGESTION_LIMIT = 4
 
 
-async def option_selection(product: str, color: str = "", size: str = "") -> dict:
-    """The colour and size a shopper chose on one product - chosen, not bought.
-
-    Resolves the product the way cart_additions does and matches each value to
-    one the product really offers ("4" for "4 UK / 5 US / 20 EU"). The widget
-    presses those options on the product's card and leaves Add to cart to them.
-    Either value may be left out; only what was chosen is selected.
-    """
-    from app.services import compare
-    from app.services.shopify_storefront import collection_tree
-
-    name = " ".join(str(product or "").split())
-    if not name:
-        return {"found": False, "reason": "no_product_named"}
-    tree = await collection_tree()
-    handle = name if name in set(tree["handles"].values()) else None
-    # The exact title first, as cart_additions does: "Catherine ... Trapeze Dress"
-    # is its own product, not a near miss of "... Trapeze Dress in Pink".
-    exact = tree["ids"].get(" ".join(name.lower().split()))
-    if handle is None and exact is not None:
-        handle = tree["handles"][exact]
-    if handle is None:
-        rivals = compare.matches(name, tree["ids"])
-        if len(rivals) > 1:
-            return {"found": False, "reason": "which_product",
-                    "which_product": [tree["titles"][tree["ids"][r]] for r in rivals[:4]]}
-        product_id, near = compare.resolve(name, tree["ids"], tree["titles"])
-        if product_id is None:
-            return {"found": False, "reason": "not_found", "did_you_mean": near}
-        handle = tree["handles"][product_id]
-    found = next(iter(await _active_products([handle])), None)
-    if found is None:
-        return {"found": False, "reason": "not_found_or_not_for_sale"}
-
-    offered = _options_of(found)
-    colour_name = next((n for n in offered if n.casefold() in ("color", "colour")), None)
-    size_name = next((n for n in offered if n.casefold() == "size"), None)
-
-    def match(values: list[str], wanted: str, said) -> str | None:
-        exact = [v for v in values if v.casefold() == wanted.casefold()]
-        loose = exact or [v for v in values if said(v, wanted.lower())]
-        return loose[0] if len(loose) == 1 else None
-
-    chosen: dict[str, str] = {}
-    not_offered: dict[str, str] = {}
-    # (the store's own option name, what to call it if the product has none, the ask)
-    for option, label, wanted, said in ((colour_name, "Color", color, shopper_words.said_colour),
-                                        (size_name, "Size", size, shopper_words.said_size)):
-        if not wanted:
-            continue
-        value = match(offered.get(option) or [], wanted, said) if option else None
-        if value:
-            chosen[option] = value
-        else:
-            not_offered[option or label] = wanted
-    return {
-        "found": True,
-        "selection": {
-            "handle": handle,
-            "title": found["title"],
-            "url": product_url(found),
-            "image": product_image(found),
-            "options": chosen,
-        },
-        "selected": chosen,
-        "not_offered": not_offered,
-        "available_colors": (offered.get(colour_name) or []) if colour_name else [],
-        "available_sizes": (offered.get(size_name) or []) if size_name else [],
-    }
-
-
 def _fits_age(sizes: list[str], age: int | None) -> bool:
     """Whether a piece comes in a size for this age. Pieces with no size run fit."""
     if age is None or not sizes:
@@ -663,7 +572,7 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
     gets something to look at. One piece per category, so the row reads as the
     start of an outfit rather than four versions of the same shirt.
     """
-    catalogue = await browse_catalogue(colour_variants=True)
+    catalogue = await browse_catalogue()
     audience = _WHO.get((for_who or "").strip().lower())
     wanted = (colour or "").strip().lower()
     age = int(age) if age else None
@@ -700,20 +609,6 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
             break
 
     still_to_ask = [name for name, have in (("age", age), ("budget", budget)) if not have]
-
-    def in_their_colour(p: dict) -> dict:
-        """The card in the colour they asked for: that colour's photo, its variant
-        behind the link, and the colour itself for the card to open on. A jacket
-        that also comes in brown showed its first variant - blue - to someone
-        who had just said brown."""
-        matched = _colour_match(p["colors"], wanted) if wanted else None
-        own = (p.get("colour_variants") or {}).get(matched) if matched else None
-        if not own or not own.get("variant_id"):
-            return {"image": p["image"], "url": p["url"]}
-        joiner = "&" if "?" in (p["url"] or "") else "?"
-        return {"image": own["image"] or p["image"], "variant_id": own["variant_id"],
-                "color": matched, "url": f'{p["url"]}{joiner}variant={own["variant_id"]}' if p["url"] else None}
-
     return {
         "currency": catalogue["currency"],
         "known": {"for": audience, "colour": colour or None, "occasion": occasion or None,
@@ -732,7 +627,8 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
                 "colour": _colour_match(p["colors"], wanted) if wanted else None,
                 "colors": p["colors"],
                 "sizes": p["sizes"],
-                **in_their_colour(p),
+                "image": p["image"],
+                "url": p["url"],
             }
             for p in picked
         ],

@@ -327,9 +327,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  product_count
       products- {items[], currency}               product cards to render: each has
                                                  product_id, variant_id, title, option,
-                                                 price, image and url; color when the
-                                                 shopper asked for one - open the card
-                                                 on that colour, its photo already is
+                                                 price, image and url
       outfit  - {items[], currency, total,        a complete look: the same cards plus
                  budget, within_budget,           the exact total and the variants to
                  cart_items[], alternatives?[]}   add to the bag; alternatives are the
@@ -360,27 +358,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  and colour the shopper chose - never
                                                  add the shown products on your own.
                                                  url: where to go afterwards
-      preference - {colour}                      the colour the shopper wants, noted by
-                                                 the agent: open every product card that
-                                                 comes in it on that colour, from now on;
-                                                 "" clears it
-      select  - {handle, title, url, image,      options the agent chose on one
-                 options}                        product for the shopper ("select
-                                                 size 1M"): options is {option name:
-                                                 value}, e.g. {"Size": "1M"}. Press
-                                                 them on that product's card - nothing
-                                                 goes in the bag
-      suggestions - {suggestions[]}              buttons under the reply, each
-                                                 {label, prompt, kind, keep?}: tapping
-                                                 one sends prompt as the shopper's
-                                                 message. keep=true: a list to browse
-                                                 (every category) - leave the row up
-                                                 after a tap
       done    - {"session_id", "reply",          the finished reply, repeating
-                 products?, outfit?, orders?,    whatever cards were produced and
-                 select?, suggestions?, cart?,   the `actions` event
-                 preference?, greeting?,
-                 collections?,
+                 products?, outfit?,             whatever cards were produced and
+                 greeting?, collections?,        the `actions` event
                  actions?}
       error   - {"message"}                      the turn failed; nothing was saved
     """
@@ -391,21 +371,6 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     if _is_greeting(req.message):
         store = await _store_briefing(req.customer)
         briefing = f"{briefing}\n\n{store}" if briefing else store
-    # What this chat last showed, beside the page they are browsing. Left to the
-    # transcript, the page line won: "select size 1M" under the bodysuit the
-    # chat had just shown went to the dress whose page was open. The model
-    # still decides which one they mean - it now sees both.
-    if req.message.strip():
-        try:
-            last_shown = [p.get("title") for p in await shown_products.recall(session_id) if p.get("title")]
-        except Exception:  # noqa: BLE001 - a lost note is a plainer answer, not a failure
-            logger.warning("Could not recall shown products for %s", session_id, exc_info=True)
-            last_shown = []
-        if last_shown:
-            note = ("[Last shown in this chat: " + "; ".join(last_shown[:6]) +
-                    ". An unnamed product - \"this\", \"it\", \"select size ...\" - means one of these, "
-                    "not the page they are browsing]")
-            briefing = f"{briefing}\n\n{note}" if briefing else note
     # Told outright rather than left for the model to count off the message: it
     # was reading "2 jackets" and still showing the shelf.
     requested = _requested_count(req.message)
@@ -571,14 +536,7 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         # an exact value, so the next add_to_cart takes it without asking again.
         # Asked on the way to checkout, a tapped answer carries the checkout on.
         then = " and checkout" if checking_out else ""
-        # The agent's own buttons for its own question come first: it chose them
-        # from the product's real options, so nothing here has to guess.
-        chips = suggestions.offered_chips(cards.offered_choices, then=then)
-        if not chips and cards.cart_waiting:
-            chips = suggestions.choice_chips(cards.cart_choice, reply, then=then)
-        if not chips and cards.categories_listed:
-            # "What categories do you have": every one of them, to tap - never collections.
-            chips = suggestions.category_chips(cards.categories_listed, cards.categories_total)
+        chips = suggestions.choice_chips(cards.cart_choice, reply, then=then) if cards.cart_waiting else []
         if not chips and not cards.collections_listed and shopify_storefront.asks_for_collection_list(req.message):
             # They asked for the collections, whichever tool the agent reached for.
             try:

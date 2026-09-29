@@ -108,12 +108,6 @@ def _questions_in(reply: str) -> str:
 CHOICE_LIMIT = 10     # a size run is longer than a row of topic chips
 
 
-def offered_chips(choices: list[str], then: str = "") -> list[dict]:
-    """The agent's own choices for the question it asked, as chips. Tapping one
-    sends it as the shopper's answer."""
-    return [{"label": c, "prompt": c + then, "kind": "offered"} for c in choices if c][:CHOICE_LIMIT]
-
-
 def choice_chips(needs_choice: list[dict], reply: str = "", then: str = "") -> list[dict]:
     """The exact options add_to_cart is waiting on, for the first product that needs one.
 
@@ -189,22 +183,6 @@ def collection_chips(collections: list[dict]) -> list[dict]:
     """
     return [{"label": c["title"], "prompt": f"What is in {c['title']}?", "kind": "collection",
              "id": c.get("handle")} for c in collections if c.get("title")]
-
-
-def category_chips(categories: list[dict], total: int = 0) -> list[dict]:
-    """The product categories as chips - the answer to "what categories do you have".
-
-    Biggest first. Tapping one asks for it by name, which get_products_by_category
-    answers; ``keep`` tells the widget to leave the row on screen so the shopper
-    can go back and pick another. When only some were shown, a last chip offers
-    the rest.
-    """
-    chips = [{"label": f'{c["name"]} ({c["product_count"]})', "prompt": f'Show me {c["name"]}',
-              "keep": True}
-             for c in categories if c.get("name")]
-    if chips and total > len(chips):
-        chips.append({"label": f"Explore all {total} categories", "prompt": "Show me all the categories"})
-    return chips
 
 
 def _title_forms(title: str) -> list[str]:
@@ -448,6 +426,22 @@ def question_chips(reply: str, colours: list[str] | None = None) -> list[dict]:
     return []
 
 
+async def _stocked_colours(limit: int = 4) -> list[str]:
+    """The colours the shop actually has most of, so a chip cannot miss."""
+    from app.services import outfit
+
+    try:
+        catalogue = await outfit.browse_catalogue()
+    except Exception:  # noqa: BLE001 - a chip row is never worth failing a reply for
+        logger.warning("Could not read colours for suggestions", exc_info=True)
+        return []
+    counts: dict[str, int] = {}
+    for product in catalogue.get("products") or []:
+        for colour in product.get("colors") or []:
+            counts[colour] = counts.get(colour, 0) + 1
+    return sorted(counts, key=lambda c: -counts[c])[:limit]
+
+
 def plural(name: str) -> str:
     """"Dress" -> "Dresses", "Shoes" -> "Shoes". Chips read as a shelf, not a SKU."""
     lowered = name.strip().lower()
@@ -553,11 +547,9 @@ async def for_turn(shown_category: dict | None = None, limit: int = MAX_SUGGESTI
        collection they named. Up to five.
     3. Failing both, the general shelves.
     """
-    # A colour question with no product behind it gets no colour chips: the
-    # store's most common colours are not that product's (Pink and Green
-    # under shoes that come in Navy and Brown). The agent offers real ones
-    # with offer_choices.
     answering = question_chips(reply)
+    if not answering and reply and _asks_a_question(reply) and re.search(r"colou?r", _questions_in(reply), re.I):
+        answering = question_chips(reply, await _stocked_colours(limit))
     if answering:
         return answering[:limit]
 

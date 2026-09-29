@@ -13,7 +13,6 @@ import re
 CARD_TOOLS = {
     "search_products": "products",
     "browse_category": "products",
-    "get_products_by_category": "products",
     "get_best_sellers": "products",
     "browse_catalogue": "products",
     "suggest_pieces": "products",
@@ -37,10 +36,6 @@ MAX_CARDS = 12
 # it is sent whole - trimming it to the few products the reply names would empty
 # a grid the shopper explicitly asked to see.
 WHOLE_RESULT_TOOLS = {"browse_category"}
-
-# Tools whose every product is sent, past MAX_CARDS: a tapped product category
-# is the shopper asking to see all of it, and thirteen dresses is thirteen cards.
-ALL_RESULT_TOOLS = {"get_products_by_category"}
 
 # Tools that change the bag: where their result keeps what changed, what kind
 # of change it is, and how the cards are headed.
@@ -242,8 +237,6 @@ def _card(item: dict) -> dict:
         "currency": item.get("currency"),
         "image": item.get("image"),
         "url": item.get("url"),
-        # The colour the card opens on, when the shopper asked for one.
-        "color": item.get("color"),
         # Only recommendations set this; it is why the product was suggested.
         "because": item.get("because"),
     }
@@ -367,8 +360,6 @@ def cards_from(tool_name: str, output: str | None) -> dict | None:
     # Cardigans" above a set of recommendations.
     if data.get("heading"):
         result["heading"] = data["heading"]
-    if tool_name in ALL_RESULT_TOOLS and data.get("category"):
-        result["group"] = data["category"]
     return result
 
 
@@ -383,7 +374,6 @@ class CardCollector:
         self.products: dict | None = None
         self.products_whole = False
         self.products_fixed = False
-        self.products_all = False
         # Instructions for the widget - add these variants, open checkout - in
         # the order the agent issued them.
         self.actions: list[dict] = []
@@ -397,10 +387,6 @@ class CardCollector:
         self.bag_cards: list[dict] = []
         # Every collection, when the shopper asked to see them all: sent as chips.
         self.collections_listed: list[dict] = []
-        # The product categories shown, when the shopper asked to see them: sent as
-        # chips, with how many there are in all so the rest can be offered.
-        self.categories_listed: list[dict] = []
-        self.categories_total = 0
         # What the shopper is looking at, so the follow-on chips can skip it.
         self.category: dict | None = None
         # Offered when the category asked for does not exist; drawn as tiles.
@@ -412,36 +398,9 @@ class CardCollector:
         self.outfits: list[dict] = []
         self.orders: dict | None = None
         self.choices: dict | None = None
-        # Options the agent chose on a product for the shopper - pressed on its
-        # card by the widget, never added.
-        self.selection: dict | None = None
-        # The colour the shopper wants, when the agent noted one this turn.
-        self.preference: str | None = None
-        # The buttons the agent chose for its own question, from real options.
-        self.offered_choices: list[str] = []
 
     def take(self, tool_name: str, output: str | None) -> tuple[str, dict] | None:
         """Record a tool result. Returns (event_name, payload) when it had cards."""
-        if tool_name == "offer_choices":
-            try:
-                self.offered_choices = json.loads(output or "{}").get("choices") or []
-            except (TypeError, ValueError, AttributeError):
-                self.offered_choices = []
-            return None
-        if tool_name == "note_preference":
-            try:
-                self.preference = str(json.loads(output or "{}").get("colour") or "")
-            except (TypeError, ValueError, AttributeError):
-                self.preference = None
-            return None
-        if tool_name == "select_options":
-            try:
-                result = json.loads(output or "{}")
-            except (TypeError, ValueError):
-                result = {}
-            if result.get("found") and (result.get("selection") or {}).get("options"):
-                self.selection = result["selection"]
-            return None
         if output and '"action"' in output:
             try:
                 action = json.loads(output).get("action")
@@ -459,17 +418,6 @@ class CardCollector:
                 self.cart_choice = result.get("needs_choice") or []
             except (TypeError, ValueError, AttributeError):
                 self.cart_waiting, self.cart_choice = True, []
-        if tool_name == "list_product_categories" and output and '"listing": "categories"' in output:
-            try:
-                listing = json.loads(output)
-                self.categories_listed = listing.get("categories") or []
-                self.categories_total = int(listing.get("count") or len(self.categories_listed))
-            except (TypeError, ValueError, AttributeError):
-                self.categories_listed, self.categories_total = [], 0
-            return None
-        if tool_name == "get_products_by_category" and output and '"found": true' in output:
-            # The list was only the way to this category; its buttons are not the answer.
-            self.categories_listed = []
         if tool_name in ("list_collections", "browse_category") and output and '"listing": "collections"' in output:
             try:
                 self.collections_listed = json.loads(output).get("collections") or []
@@ -494,7 +442,6 @@ class CardCollector:
             # Set per result, so a later ordinary search still gets reconciled.
             self.products_whole = tool_name in WHOLE_RESULT_TOOLS
             self.products_fixed = tool_name in FIXED_RESULT_TOOLS
-            self.products_all = tool_name in ALL_RESULT_TOOLS
         if name == "outfit":
             self.outfits.append(cards)
         if tool_name in BAG_TOOLS:
@@ -598,7 +545,7 @@ class CardCollector:
             return
         # Choices are never reconciled against the wording: the whole point is
         # that they do not depend on what the agent chose to say.
-        if self.products is None or self.products_fixed or self.products_all:
+        if self.products is None or self.products_fixed:
             return
         items = self.products.get("items") or []
         kept = keep_mentioned(items, _without_choices(reply),
@@ -653,18 +600,12 @@ class CardCollector:
         out: dict = {}
         if self.products is not None:
             items = self.products.get("items") or []
-            # A whole shelf or category goes whole: the reply says "30 pieces in
-            # all", and the widget folds the rest under "Show N more" itself.
-            capped = len(items) > MAX_CARDS and not (self.products_all or self.products_whole)
-            out["products"] = {**self.products, "items": items[:MAX_CARDS]} if capped else self.products
+            out["products"] = ({**self.products, "items": items[:MAX_CARDS]}
+                               if len(items) > MAX_CARDS else self.products)
         if self.outfit is not None:
             out["outfit"] = self.outfit
         if self.orders is not None:
             out["orders"] = self.orders
-        if self.selection is not None:
-            out["select"] = self.selection
-        if self.preference is not None:
-            out["preference"] = {"colour": self.preference}
         if self.choices is not None:
             out["choices"] = self.choices
         if self.categories is not None:

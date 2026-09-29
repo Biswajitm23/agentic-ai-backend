@@ -16,8 +16,7 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.services import (cart_removal, compare, handbook, order_changes, outfit, product_categories,
-                          shopify_storefront, store_profile)
+from app.services import cart_removal, compare, handbook, order_changes, outfit, shopify_storefront, store_profile
 from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError, store_domain
 
@@ -65,12 +64,10 @@ async def check_order_status(order_number: str, email: str) -> str:
 @tool
 async def add_to_cart(items: list[dict], forget_others: bool = False, similar: str = "") -> str:
     """Put products in the shopper's bag. The storefront does the adding; this
-    finds the exact variant and tells it which. Only when they ask for it to go
-    in the bag or to buy it - choosing, selecting or picking a colour or size is
-    not that: use select_options.
+    finds the exact variant and tells it which.
 
     items: [{"product": "<name or handle>", "color": "Pink", "size": "5Y", "quantity": 1}]
-      "this"/"it" is the product the chat is about. Only the color and size the
+      "this"/"it" is the product they are viewing. Only the color and size the
       shopper said themselves - it checks their words, and anything else comes
       back unconfirmed. build_outfit's cart_items ([{"variant_id", "quantity"}])
       are checked the same way.
@@ -99,71 +96,6 @@ async def add_to_cart(items: list[dict], forget_others: bool = False, similar: s
 
 
 @tool
-async def offer_choices(choices: list[str]) -> str:
-    """The buttons under your reply, when you ask the shopper to choose - a colour,
-    a size, which product, yes or no. Call it every time you ask them to pick.
-
-    choices: exactly what they can pick, in the words to show: real values from
-      a tool result this chat ("Navy", "Beige", "Blue" from available_colors) -
-      never invented, never a colour or size the product does not come in.
-      Tapping one sends it as their message.
-
-    Call it BEFORE you write your reply, together with any other tool: words
-    written before a tool call are dropped as thinking aloud, so a reply written
-    first and followed by this call loses everything but its last line.
-    """
-    picked = [" ".join(str(c).split()) for c in choices or [] if str(c).strip()]
-    return json.dumps({"choices": list(dict.fromkeys(picked))}, ensure_ascii=False)
-
-
-@tool
-async def note_preference(colour: str) -> str:
-    """Remember the colour the shopper wants, for every product shown from now on -
-    "I want brown", "in pink please", "my colour preference is navy". Call it the
-    moment they state or change one; "" when they drop it ("any colour is fine").
-
-    colour: the colour as they want it, e.g. "Brown". Every card for a product
-      that comes in it then opens on that colour - its photo, its variant
-      selected. Products that do not come in it are shown as they are.
-    It applies to cards shown from now on - cards already on screen keep their
-    colour, so to show them in the new one, show them again this turn.
-    Call it alongside whatever else you do this turn; it changes nothing else.
-    """
-    return json.dumps({"colour": " ".join(str(colour or "").split())}, ensure_ascii=False)
-
-
-@tool
-async def select_options(product: str, color: str = "", size: str = "") -> str:
-    """Choose a colour and/or size on a product FOR the shopper, without adding it -
-    "select blue", "choose size 4", "pick the first size", "select color Blue and
-    size M". The storefront presses those options on the product's card and the
-    shopper adds it themselves.
-
-    product: its name or handle; "this"/"it" is the product the chat is about.
-    color, size: the values they chose, as they said them or as you read them off
-      the product's options ("the first size" is available_sizes[0] - call once
-      without it to see them). Pass everything that should now be chosen on THIS
-      product, the earlier choice too - the card shows exactly what you send, so
-      never say something is chosen that you did not send. Leave out what they
-      have not chosen.
-
-    selected: what is now chosen on the card. Nothing is in the bag: never say it is.
-    not_offered: a value it does not come in - say so, and offer its own
-      available_colors / available_sizes instead.
-    found=false: which_product (ask which), or not_found with did_you_mean.
-    Confirm it in one short, warm line written fresh for this product and this
-    shopper - friendly, never pushy, never a stock phrase - and ask whether it
-    should go in their bag. Offer that choice as buttons with offer_choices, in
-    your own words. A yes is add_to_cart with that product and exactly what is
-    selected.
-    """
-    try:
-        return json.dumps(await outfit.option_selection(product, color, size), ensure_ascii=False)
-    except (ShopifyError, KeyError, ValueError) as exc:
-        return _fail("select_options", exc)
-
-
-@tool
 async def remove_from_cart(items: list[dict]) -> str:
     """Take products out of the shopper's bag - "remove the belt", "take out the
     pink one", "I don't want the dress any more", "empty my bag". The storefront
@@ -172,7 +104,7 @@ async def remove_from_cart(items: list[dict]) -> str:
     items: [{"product": "<name as they said it>", "color": "Pink", "size": "5Y",
       "quantity": 1}] - color and size only when they said one, quantity only when
       they said how many (otherwise the whole line goes). "this"/"it" is the
-      product the chat is about. {"product": "everything"} empties the bag.
+      product they are viewing. {"product": "everything"} empties the bag.
     done=true: confirm in one line what came out.
     needs_choice: NOTHING was removed - more than one line in their bag answers
       to that name (in_cart lists them): ask which, then call again.
@@ -191,18 +123,13 @@ async def edit_cart(items: list[dict]) -> str:
     "change it to blue". The storefront does the changing; this finds the exact
     line in their bag and what it becomes.
 
-    Only for a piece they mean IN THEIR BAG. "Select size 1M" / "choose blue"
-    about a product the chat is showing is select_options - even when something
-    else is in the bag. A size a product does not come in is never a reason to
-    change a different product's size.
-
     items: [{"product": "<name as in their bag>", "color"/"size": only to pick
       between two lines of it, "quantity": <how many they want afterwards>,
       "change_by": -1 or 2 for "one less" / "two more", "new_color": "Blue",
       "new_size": "5Y", "what": "quantity" | "size" | "color"}]
       Give what they said and nothing more: a new size or colour only in their
       words. "what" says which they want to change when they did not say to what.
-      "this"/"it" is the product the chat is about. To take a line out entirely,
+      "this"/"it" is the product they are viewing. To take a line out entirely,
       use remove_from_cart.
     done=true: confirm in one line what changed.
     needs_choice: NOTHING changed - ask for just what it lists as missing:
@@ -399,69 +326,10 @@ async def _collection_list() -> dict:
     }
 
 
-async def _category_list(show: int) -> dict:
-    listed = await product_categories.store_categories()
-    shown = listed if show <= 0 else listed[:show]
-    return {
-        "listing": "categories",
-        "count": len(listed),
-        "shown": len(shown),
-        "categories": [{k: c[k] for k in ("id", "name", "full_name", "product_count", "image")}
-                       for c in shown],
-    }
-
-
-@tool
-async def list_product_categories(show: int) -> str:
-    """The product CATEGORIES the store sells in - "what categories do you have",
-    "show me some categories", "what kinds of products do you sell".
-
-    show: how many to show, biggest first - your call, from what they asked
-      and how the conversation is going. A general or "some" question deserves
-      a short, easy selection rather than the whole list; 0 means every one,
-      for when they want all of them (including a tap on "Explore all
-      categories"). When fewer than all are shown, an "Explore all categories"
-      button is added for the rest.
-
-    These are Shopify's product categories ("Baby & Children's Dresses"), not
-    collections - never answer a category question with list_collections. The
-    storefront shows each one as a button to tap, so say in one line how many
-    you are showing out of how many and to tap one, and never list or number them
-    yourself.
-    """
-    try:
-        return json.dumps(await _category_list(show), ensure_ascii=False)
-    except (ShopifyError, KeyError, ValueError) as exc:
-        return _fail("list_product_categories", exc)
-
-
-@tool
-async def get_products_by_category(categories: list[str]) -> str:
-    """Every product in one or more product CATEGORIES - "Show me Shirts", "show me
-    dresses", or a category button the shopper tapped.
-
-    categories: exact category names or ids from list_product_categories, e.g.
-      ["Baby & Children's Dresses"]. You choose which categories the shopper
-      means - "dresses" is "Baby & Children's Dresses", "t-shirts" is "T-Shirts"
-      and not "Shirts". Pass several to cover them all at once.
-
-    The storefront draws every product under the category name. found=false
-    means a name was not an exact category: it hands back every category -
-    pick the right one(s) and call again, or try browse_category if none fit.
-    """
-    try:
-        if isinstance(categories, str):
-            categories = [categories]
-        return json.dumps(await product_categories.products_in(categories), ensure_ascii=False)
-    except (ShopifyError, KeyError, ValueError) as exc:
-        return _fail("get_products_by_category", exc)
-
-
 @tool
 async def list_collections() -> str:
-    """Every COLLECTION the store has - "show me all your collections", "what
-    collections do you have". No arguments. Only when they say "collection":
-    a question about categories goes to list_product_categories.
+    """Every collection the store has - "show me all your collections", "what
+    categories do you have", "what sections are there". No arguments.
 
     The storefront shows each one as a button to tap, so say in one line that
     here they are, and never list or number them yourself.
@@ -474,17 +342,17 @@ async def list_collections() -> str:
 
 @tool
 async def browse_category(category: str) -> str:
-    """Every product in ONE collection or shelf the shopper named or tapped.
+    """Every product in ONE category the shopper named or tapped.
 
-    category: what they actually gave you - a name like "Grace Collection", or
-      the id a collection tile sent back. Plurals are fine, and both kinds of
-      tile - product types and collections - land on the right products.
+    category: what they actually gave you - a name like "Dress" or "Grace
+      Collection", or the id a category tile sent back. Plurals are fine
+      ("dresses"), and both kinds of tile - product types and collections - land
+      on the right products.
 
-    Use this for a collection ("what is in Winter Luxe"), a collection button,
-    or a kind of product get_products_by_category found nothing for. A product
-    category ("show me dresses", "Show me Shirts") goes to get_products_by_category
-    first. Prefer either over search_products for a shelf - it returns the whole
-    shelf, in stock, rather than a keyword guess.
+    Use this whenever a shopper wants a category rather than one named product:
+    "show me dresses", "what is in Winter Luxe", or a bare category name arriving
+    on its own. Prefer it over search_products for a category - it returns the
+    whole category, in stock, rather than a keyword guess.
 
     Who it is for is a shelf too: "girls", "for my son", "baby", "products for
     girls" return every piece tagged for them (kind "audience"; count is how many
@@ -506,9 +374,7 @@ async def browse_category(category: str) -> str:
         if shopify_storefront.asks_for_collection_list(category):
             return json.dumps(await _collection_list(), ensure_ascii=False)
         return json.dumps(
-            await shopify_storefront.category_products(
-                category, shopify_storefront.CATEGORY_PRODUCT_LIMIT),
-            ensure_ascii=False
+            await shopify_storefront.category_products(category), ensure_ascii=False
         )
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("browse_category", exc)
@@ -675,13 +541,8 @@ async def confirm_order_change(
 
 
 CUSTOMER_SUPPORT_TOOLS = [
-    note_preference,
-    offer_choices,
-    select_options,
     search_products,
     browse_category,
-    list_product_categories,
-    get_products_by_category,
     list_collections,
     get_best_sellers,
     suggest_pieces,
