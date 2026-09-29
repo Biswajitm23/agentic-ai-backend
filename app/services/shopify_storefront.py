@@ -371,6 +371,37 @@ def suits(tags: list[str] | None) -> list[str]:
     return [name for name in AUDIENCE_TAGS if name.lower() in lowered]
 
 
+def _on_sale(variant: dict) -> bool:
+    """A variant is on sale when Shopify's compare-at price sits above its price."""
+    try:
+        return float(variant.get("compareAtPrice") or 0) > float(variant.get("price") or 0) > 0
+    except (TypeError, ValueError):
+        return False
+
+
+def sale_summary(variants: list[dict]) -> dict:
+    """What a product's sale comes to, from its variants - or {} when none is reduced.
+
+    Read off the compare-at price, the only place Shopify keeps a "was" price: a
+    piece is on sale when any variant has one above its price. price_from and
+    was_price_from are the cheapest reduced variant's, so "from 3,040, was 3,800"
+    is one real variant rather than two numbers from different sizes.
+    """
+    reduced = [v for v in variants if _on_sale(v)]
+    if not reduced:
+        return {}
+    cheapest = min(reduced, key=lambda v: float(v["price"]))
+    percents = [round((1 - float(v["price"]) / float(v["compareAtPrice"])) * 100) for v in reduced]
+    return {
+        "on_sale": True,
+        "sale_price_from": round(float(cheapest["price"]), 2),
+        "was_price_from": round(float(cheapest["compareAtPrice"]), 2),
+        "discount_percent": max(percents),
+        # Some sizes may be reduced and others not: say so rather than imply all are.
+        "all_variants_on_sale": len(reduced) == len(variants),
+    }
+
+
 def _public_product(node: dict, currency: str) -> dict:
     variants = node["variants"]["nodes"]
     prices = [float(v["price"]) for v in variants if v.get("price") is not None]
@@ -385,6 +416,7 @@ def _public_product(node: dict, currency: str) -> dict:
         "price_from": round(min(prices), 2) if prices else None,
         "price_to": round(max(prices), 2) if prices else None,
         "availability": _availability(variants),
+        **sale_summary(variants),
         "variants": [_public_variant(v, node) for v in variants],
     }
 
@@ -401,6 +433,261 @@ async def search_products(query: str = "", limit: int = PRODUCT_LIMIT) -> dict:
     )
     products = [_public_product(n, currency) for n in data["products"]["nodes"]]
     return {"query": term, "currency": currency, "count": len(products), "products": products}
+
+
+# ── Sale ───────────────────────────────────────────────────────────────────
+# Shopify keeps no "on sale" flag and its product search cannot filter on the
+# compare-at price, so the active catalogue is scanned once and the reduced
+# pieces kept, cached for everyone. One scan answers "what's on sale", "sale
+# dresses", "anything on sale under 5000" and "the biggest discount".
+
+SALE_SCAN = """
+query SupportSaleScan($first: Int!, $after: String, $variants: Int!) {
+  products(first: $first, after: $after, query: "status:ACTIVE", sortKey: TITLE) {
+    pageInfo { hasNextPage endCursor }
+    nodes {
+      legacyResourceId
+      title
+      handle
+      productType
+      tags
+      onlineStoreUrl
+      totalInventory
+      featuredMedia { ... on MediaImage { image { url altText } } }
+      variants(first: $variants) {
+        nodes {
+          legacyResourceId
+          sku
+          title
+          price
+          compareAtPrice
+          availableForSale
+          inventoryQuantity
+          media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+        }
+      }
+    }
+  }
+}
+"""
+SALE_SCAN_PAGE = 100
+SALE_SCAN_PAGES = 10          # ...so at most 1000 products are looked at
+SALE_VARIANTS = 50            # every size of a shoe, not just the first ten
+SALE_LIMIT = 24               # most a caller may ask for
+
+_sale_cache: tuple[float, list[dict]] | None = None
+
+
+async def _reduced_products(currency: str) -> list[dict]:
+    """Every active product with at least one reduced variant, biggest discount first."""
+    global _sale_cache
+    if _fresh(_sale_cache, settings.SUPPORT_SALE_CACHE_MINUTES):
+        return _sale_cache[1]
+    found: list[dict] = []
+    after = None
+    for _ in range(SALE_SCAN_PAGES):
+        data = (await graphql(SALE_SCAN, {"first": SALE_SCAN_PAGE, "after": after,
+                                          "variants": SALE_VARIANTS}))["products"]
+        for node in data["nodes"]:
+            product = _public_product(node, currency)
+            if product.get("on_sale"):
+                # Only the reduced sizes: a shopper asking about the sale should
+                # not be offered the full-price ones as if they were part of it.
+                product["variants"] = [v for v in product["variants"]
+                                       if _sale_variant(v)] or product["variants"]
+                found.append(product)
+        if not data["pageInfo"]["hasNextPage"]:
+            break
+        after = data["pageInfo"]["endCursor"]
+    found.sort(key=lambda p: (-p["discount_percent"], p["sale_price_from"]))
+    _sale_cache = (time.monotonic(), found)
+    return found
+
+
+def _sale_variant(variant: dict) -> bool:
+    try:
+        return float(variant.get("was_price") or 0) > float(variant.get("price") or 0)
+    except (TypeError, ValueError):
+        return False
+
+
+def _singular(word: str) -> str:
+    """"dresses" -> "dress", "shoes" -> "shoe", "onesies" -> "onesy"; enough for a match."""
+    if word.endswith("ies") and len(word) > 4:
+        return word[:-3] + "y"
+    if word.endswith(("sses", "shes", "ches", "xes")):
+        return word[:-2]
+    if word.endswith("s") and not word.endswith("ss"):
+        return word[:-1]
+    return word
+
+
+def _matches_category(product: dict, category: str) -> bool:
+    """Loose match on who or what it is: "dresses", "girls", "shoes", "baby"."""
+    words = [_singular(w) for w in re.findall(r"[a-z]+", category.lower()) if len(w) > 2]
+    if not words:
+        return True
+    haystack = " ".join([product["title"], product.get("category") or "", *product.get("for", [])]).lower()
+    return all(w in haystack for w in words)
+
+
+async def sale_products(category: str = "", max_price: float = 0, limit: int = 8) -> dict:
+    """What is on sale now: reduced products, filtered by category and budget.
+
+    found=false with total_on_sale=0 means nothing in the store is reduced at
+    all; with total_on_sale above 0 it means the sale has pieces, just none that
+    match - and categories_on_sale says where the sale is.
+    """
+    currency = (await shop_info())["currency"]
+    everything = await _reduced_products(currency)
+    picked = [p for p in everything if _matches_category(p, category)]
+    if max_price and max_price > 0:
+        picked = [p for p in picked if p["sale_price_from"] <= max_price]
+    limit = max(1, min(limit, SALE_LIMIT))
+    in_sale = sorted({p["category"] for p in everything if p.get("category")})
+    return {
+        "found": bool(picked),
+        "currency": currency,
+        "total_on_sale": len(everything),
+        "count": min(len(picked), limit),
+        "matching": len(picked),
+        "categories_on_sale": in_sale,
+        "biggest_discount_percent": everything[0]["discount_percent"] if everything else None,
+        "products": picked[:limit],
+    }
+
+
+# ── New arrivals ───────────────────────────────────────────────────────────
+# "What's new?" is answered from Shopify's own dates: products created in the
+# last SUPPORT_NEW_ARRIVALS_DAYS, newest first. A merchant who keeps a "New In"
+# collection names it in SUPPORT_NEW_ARRIVALS_COLLECTION and that wins, since
+# a bulk import stamps a whole catalogue with one date.
+
+NEW_ARRIVALS = """
+query SupportNewArrivals($query: String!, $first: Int!, $variants: Int!) {
+  products(first: $first, query: $query, sortKey: CREATED_AT, reverse: true) {
+    nodes {
+      legacyResourceId
+      title
+      handle
+      productType
+      tags
+      createdAt
+      onlineStoreUrl
+      totalInventory
+      featuredMedia { ... on MediaImage { image { url altText } } }
+      variants(first: $variants) {
+        nodes {
+          legacyResourceId
+          sku
+          title
+          price
+          compareAtPrice
+          availableForSale
+          inventoryQuantity
+          media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+        }
+      }
+    }
+  }
+}
+"""
+NEW_IN_COLLECTION = """
+query SupportNewInCollection($handle: String!, $first: Int!, $variants: Int!) {
+  collectionByHandle(handle: $handle) {
+    title
+    handle
+    products(first: $first, sortKey: CREATED, reverse: true) {
+      nodes {
+        legacyResourceId
+        title
+        handle
+        productType
+        tags
+        status
+        createdAt
+        onlineStoreUrl
+        totalInventory
+        featuredMedia { ... on MediaImage { image { url altText } } }
+        variants(first: $variants) {
+          nodes {
+            legacyResourceId
+            sku
+            title
+            price
+            compareAtPrice
+            availableForSale
+            inventoryQuantity
+            media(first: 1) { nodes { ... on MediaImage { image { url } } } }
+          }
+        }
+      }
+    }
+  }
+}
+"""
+NEW_ARRIVALS_SCAN = 100       # newest products looked at
+NEW_ARRIVALS_LIMIT = 24       # most a caller may ask for
+
+
+def _with_date(node: dict, currency: str) -> dict:
+    product = _public_product(node, currency)
+    product["added_on"] = (node.get("createdAt") or "")[:10] or None
+    return product
+
+
+async def new_arrivals(category: str = "", limit: int = 8) -> dict:
+    """The newest in-stock pieces, mixed across categories, optionally for one category.
+
+    source: "collection" when the merchant's New In collection answered,
+    "recent" when products added in the window did, "newest" when nothing is
+    that recent and these are simply the latest there are - say so rather than
+    call them new. all_same_day: most of the window was added on one date (an
+    import), so "new" should be worded as "our latest pieces", not "this week".
+    """
+    currency = (await shop_info())["currency"]
+    limit = max(1, min(limit, NEW_ARRIVALS_LIMIT))
+    days = max(1, settings.SUPPORT_NEW_ARRIVALS_DAYS)
+    source, heading = "recent", "New in"
+    products: list[dict] = []
+
+    handle = settings.SUPPORT_NEW_ARRIVALS_COLLECTION.strip()
+    if handle:
+        data = (await graphql(NEW_IN_COLLECTION, {"handle": handle, "first": NEW_ARRIVALS_SCAN,
+                                                   "variants": VARIANT_LIMIT}))["collectionByHandle"]
+        if data:
+            source, heading = "collection", data["title"]
+            products = [_with_date(n, currency) for n in data["products"]["nodes"]
+                        if n.get("status") == "ACTIVE"]
+    if source != "collection":
+        since = (datetime.date.today() - datetime.timedelta(days=days)).isoformat()
+        data = await graphql(NEW_ARRIVALS, {"query": f"status:ACTIVE AND created_at:>={since}",
+                                            "first": NEW_ARRIVALS_SCAN, "variants": VARIANT_LIMIT})
+        products = [_with_date(n, currency) for n in data["products"]["nodes"]]
+        if not products:
+            source, heading = "newest", "Our latest pieces"
+            data = await graphql(NEW_ARRIVALS, {"query": "status:ACTIVE", "first": limit * 3,
+                                                "variants": VARIANT_LIMIT})
+            products = [_with_date(n, currency) for n in data["products"]["nodes"]]
+
+    products = [p for p in products if p["availability"] == "in_stock"]
+    total = len(products)
+    picked = [p for p in products if _matches_category(p, category)]
+    dates = [p["added_on"] for p in products if p.get("added_on")]
+    busiest = max((dates.count(d) for d in set(dates)), default=0)
+    return {
+        "found": bool(picked),
+        "currency": currency,
+        "source": source,
+        "heading": heading,
+        "window_days": days if source == "recent" else None,
+        "total_new": total,
+        "matching": len(picked),
+        "newest_added_on": max(dates) if dates else None,
+        "all_same_day": total > limit and busiest >= 0.8 * total,
+        "categories_new": sorted({p["category"] for p in products if p.get("category")}),
+        "products": _mixed(picked)[:limit],
+    }
 
 
 def order_number_variants(raw: str) -> list[str]:

@@ -13,6 +13,7 @@ a look can never contain something a shopper cannot buy.
 
 import json
 import logging
+import re
 from decimal import Decimal, InvalidOperation
 
 from app.services import shopper_words
@@ -20,6 +21,7 @@ from app.services.shopify_client import ShopifyError, graphql
 from app.services.shopify_storefront import (
     product_image,
     product_url,
+    sale_summary,
     shop_info,
     variant_image,
     variant_options,
@@ -69,6 +71,7 @@ query OutfitCatalogue($query: String!, $first: Int!, $variants: Int!, $after: St
           sku
           title
           price
+          compareAtPrice
           availableForSale
           inventoryQuantity
           selectedOptions { name value }
@@ -79,6 +82,41 @@ query OutfitCatalogue($query: String!, $first: Int!, $variants: Int!, $after: St
   }
 }
 """
+
+
+# What each piece does in a look, by the store's product types (or CATEGORY_RULES).
+_ROLES = {
+    "one_piece": {"dress", "romper", "sleepsuit", "bodysuit", "set", "pyjamas", "all in one"},
+    "top": {"top", "blouse", "shirt", "sweater", "jumper", "cardigan"},
+    "bottoms": {"bottoms", "trousers", "shorts", "skirt", "jeans", "leggings"},
+    "shoes": {"shoes", "boots", "sandals"},
+}
+
+
+def _role(item: dict) -> str | None:
+    kind = (item.get("category") or "").strip().lower()
+    title = (item.get("title") or "").lower()
+    for role, kinds in _ROLES.items():
+        if kind in kinds or (kind in ("", "other") and any(k in title for k in kinds)):
+            return role
+    if "set" in title and "piece" in title:          # "Two Piece Set" is a whole outfit
+        return "one_piece"
+    return None
+
+
+def look_gaps(items: list[dict]) -> list[str]:
+    """What a look still needs to be wearable: something to wear (a dress or
+    romper, or a top AND bottoms) and shoes. [] when it is complete."""
+    roles = {_role(i) for i in items}
+    gaps = []
+    if "one_piece" not in roles:
+        if "top" not in roles:
+            gaps.append("top")
+        if "bottoms" not in roles:
+            gaps.append("bottoms")
+    if "shoes" not in roles:
+        gaps.append("shoes")
+    return gaps
 
 
 def _category(title: str, product_type: str | None) -> str:
@@ -170,6 +208,8 @@ async def browse_catalogue() -> dict:
                 "sizes": options.get("Size") or [],
                 "image": product_image(node),
                 "url": product_url(node),
+                # on_sale, sale_price_from, was_price_from, discount_percent - when reduced.
+                **sale_summary(variants),
             }
         )
     by_category: dict[str, list[str]] = {}
@@ -197,6 +237,7 @@ query CartVariant($id: ID!) {
     legacyResourceId
     title
     price
+    compareAtPrice
     availableForSale
     selectedOptions { name value }
     media(first: 1) { nodes { ... on MediaImage { image { url } } } }
@@ -248,6 +289,13 @@ def _choice_needed(title: str, missing: list[str], unconfirmed: dict,
     return entry
 
 
+def _was_price(variant: dict) -> float | None:
+    """A variant's compare-at price when it is above its price - its sale's "was" - else None."""
+    was = _money(variant.get("compareAtPrice"))
+    now = _money(variant.get("price"))
+    return float(was) if was is not None and now is not None and was > now else None
+
+
 def _cart_line(product: dict, variant: dict, quantity: int) -> dict:
     unit = _money(variant["price"])
     variant_id = variant.get("legacyResourceId")
@@ -260,6 +308,7 @@ def _cart_line(product: dict, variant: dict, quantity: int) -> dict:
         **variant_options(variant),
         "quantity": quantity,
         "unit_price": float(unit),
+        "was_price": _was_price(variant),
         "line_total": float(unit * quantity),
         "image": variant_image(variant) or product_image(product),
         "url": product_url(product, variant_id),
@@ -269,7 +318,8 @@ def _cart_line(product: dict, variant: dict, quantity: int) -> dict:
 SIMILAR_DECISIONS = {"replace", "both", "skip"}
 
 
-async def cart_additions(items: list[dict], forget_others: bool = False, similar: str = "") -> dict:
+async def cart_additions(items: list[dict], forget_others: bool = False, similar: str = "",
+                         confirmed: bool = False) -> dict:
     """What to add to the bag, as exact variants, and the instruction to add them.
 
     Each item names a product ("Catherine gingham dress", or a handle) with its
@@ -340,6 +390,11 @@ async def cart_additions(items: list[dict], forget_others: bool = False, similar
             colours = offered.get("Color") or offered.get("Colour") or []
             sizes = offered.get("Size") or []
             missing, unconfirmed = _unchosen(colours, sizes, _colour_of(node), _option_value(node, "Size"))
+            # A look the shopper was shown - every piece with its size and
+            # colour - and said yes to is chosen, not guessed: asking "what size
+            # shirt?" for a 10Y look they just accepted left the bag empty.
+            if confirmed:
+                missing, unconfirmed = [], {}
             if missing:
                 return {**found, "choice": _choice_needed(product["title"], missing, unconfirmed, colours, sizes),
                         "waiting": {"product": product["title"], "handle": product["handle"],
@@ -535,6 +590,79 @@ _WHO = {
 
 SUGGESTION_LIMIT = 4
 
+_WHO_RE = re.compile(r"\b(" + "|".join(sorted(_WHO, key=len, reverse=True)) + r")s?\b", re.I)
+
+
+def _audience_in(for_who: str | None) -> str | None:
+    """Boys, Girls or Baby from the shopper's own words - "my 10 year old son", "girl",
+    "newborn" - or None when they have not said ("my child", "a 10 year old")."""
+    text = (for_who or "").strip().lower()
+    if text in _WHO:
+        return _WHO[text]
+    found = _WHO_RE.search(text)
+    return _WHO.get(found.group(1).lower()) if found else None
+
+# Who this store does not dress. Asked for "an outfit for a 20 year old woman",
+# the size filter let every one-size and shoe-sized piece through - bibs, baby
+# sunglasses - because an adult age matches no size and those have no age at all.
+_ADULT_RE = re.compile(
+    r"\b(?:woman|women|man|men|adults?|lady|ladies|gentlem[ae]n|mum|mom|mother|dad|father|"
+    r"wife|husband|girlfriend|boyfriend|myself|grown[- ]?ups?)\b",
+    re.I,
+)
+_TEEN_RE = re.compile(r"\b(?:teens?|teenagers?|teenage|adolescents?)\b", re.I)
+ADULT_AGE = 18
+_AGE_IN_TEXT_RE = re.compile(r"\b(\d{1,3})\s*-?\s*(?:years?|yrs?|y/?o)\b", re.I)
+_Y_SIZE_RE = re.compile(r"\b(\d{1,2})\s*Y\b", re.I)
+_EU_SIZE_RE = re.compile(r"\b(\d{2})\s*EU\b", re.I)
+# Within this many years above the largest size, show the largest size and say so.
+EDGE_YEARS = 2
+# Baby-only pieces: kept out of suggestions once the child is past the baby stage.
+_BABY_ONLY_RE = re.compile(r"\b(?:baby|newborn|bib|bibs|dummy|pram)\b", re.I)
+BABY_AGE = 3
+
+
+def _largest_sizes(products: list[dict]) -> dict:
+    """The biggest clothing age size and shoe size the catalogue actually sells."""
+    ages = [int(m) for p in products for s in p["sizes"] for m in _Y_SIZE_RE.findall(s)]
+    shoes = [int(m) for p in products for s in p["sizes"] for m in _EU_SIZE_RE.findall(s)]
+    return {"clothing_age": max(ages) if ages else None, "shoe_eu": max(shoes) if shoes else None}
+
+
+def _stated_age(age: int | None, *texts: str) -> int | None:
+    if age:
+        return int(age)
+    for text in texts:
+        found = _AGE_IN_TEXT_RE.search(text or "")
+        if found:
+            return int(found.group(1))
+    return None
+
+
+def _range_check(for_who: str, occasion: str, age: int | None, largest: dict) -> dict | None:
+    """Why this shopper is outside what the store sells, or None when they are not.
+
+    reason "adult": the words name a grown-up; "too_old": an age well past the
+    largest size; "edge": just past it - still served, in the largest size.
+    """
+    top = largest.get("clothing_age")
+    sizes = {"clothing": f"{top}Y" if top else None,
+             "shoes": f"EU {largest['shoe_eu']}" if largest.get("shoe_eu") else None}
+    words = f"{for_who} {occasion}"
+    if _ADULT_RE.search(words) or (age is not None and age >= ADULT_AGE):
+        return {"reason": "adult", "largest_sizes": sizes,
+                "tell_customer": "We're a children's store, so our sizes run up to "
+                                 f"{sizes['clothing'] or 'children’s sizes'} - nothing here would fit an adult."}
+    if (top and age is not None and age > top + EDGE_YEARS) or (_TEEN_RE.search(words) and age is None):
+        at = f" at {age}" if age is not None else ""
+        return {"reason": "too_old", "largest_sizes": sizes,
+                "tell_customer": f"Our clothes go up to {top}Y, so we wouldn't have their size{at}."}
+    if top and age is not None and age > top:
+        return {"reason": "edge", "largest_sizes": sizes, "nearest_size": f"{top}Y",
+                "tell_customer": f"Our largest size is {top}Y (about 141-152 cm) - it may fit, "
+                                 "depending on their height."}
+    return None
+
 
 def _fits_age(sizes: list[str], age: int | None) -> bool:
     """Whether a piece comes in a size for this age. Pieces with no size run fit."""
@@ -573,9 +701,31 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
     start of an outfit rather than four versions of the same shirt.
     """
     catalogue = await browse_catalogue()
-    audience = _WHO.get((for_who or "").strip().lower())
+    audience = _audience_in(for_who)
     wanted = (colour or "").strip().lower()
-    age = int(age) if age else None
+    age = _stated_age(age, for_who, occasion)
+
+    # Outside the range: say so, with nothing to show - a bib is not an answer to
+    # "an outfit for my wife". Just past it: carry on in the largest size.
+    out_of_range = _range_check(for_who, occasion, age, _largest_sizes(catalogue["products"]))
+    if out_of_range and out_of_range["reason"] != "edge":
+        return {"currency": catalogue["currency"], "out_of_range": True, **out_of_range,
+                "known": {"for": for_who or None, "age": age}, "still_to_ask": [],
+                "count": 0, "products": []}
+    if out_of_range:
+        age = int(out_of_range["nearest_size"][:-1])
+
+    # A stylist asks who it is for before holding anything up. "An outfit for my
+    # 10 year old child" drew a girls' smocked dress beside a boys' jacket - a
+    # look for nobody. Past the baby stage, nothing is shown until they say.
+    if audience is None and not (age is not None and age < BABY_AGE):
+        return {"currency": catalogue["currency"], "ask_first": "for",
+                "question": "Is it for a boy or a girl?",
+                "known": {"for": None, "colour": colour or None, "occasion": occasion or None,
+                          "age": age, "budget": budget or None},
+                "still_to_ask": ["for", *[n for n, have in (("age", age), ("occasion", occasion),
+                                                            ("budget", budget)) if not have]],
+                "count": 0, "products": []}
 
     pool = [p for p in catalogue["products"] if p["in_stock"]]
     if audience:
@@ -584,6 +734,8 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
         pool = [p for p in pool if p["category"] not in _NURSERY_BASICS]
     if age is not None:
         pool = [p for p in pool if _fits_age(p["sizes"], age)]
+        if age >= BABY_AGE:
+            pool = [p for p in pool if not _BABY_ONLY_RE.search(f"{p['title']} {p['category']}")]
     if budget:
         pool = [p for p in pool if p["price_from"] is not None and p["price_from"] <= budget]
 
@@ -608,7 +760,9 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
         if len(picked) >= max(1, limit):
             break
 
-    still_to_ask = [name for name, have in (("age", age), ("budget", budget)) if not have]
+    # In the order a stylist would ask: how old, what it is for, then the budget.
+    still_to_ask = [name for name, have in (("age", age), ("occasion", occasion), ("budget", budget))
+                    if not have]
     return {
         "currency": catalogue["currency"],
         "known": {"for": audience, "colour": colour or None, "occasion": occasion or None,
@@ -623,6 +777,8 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
                 "title": p["title"],
                 "category": p["category"],
                 "price_from": p["price_from"],
+                **{k: p[k] for k in ("on_sale", "sale_price_from", "was_price_from", "discount_percent")
+                   if k in p},
                 "currency": catalogue["currency"],
                 "colour": _colour_match(p["colors"], wanted) if wanted else None,
                 "colors": p["colors"],
@@ -632,6 +788,8 @@ async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = ""
             }
             for p in picked
         ],
+        # Just past the largest size: these are in it, and the shopper should know.
+        **({"size_note": out_of_range} if out_of_range else {}),
     }
 
 
@@ -688,6 +846,7 @@ async def recommend_from_orders(orders: list[dict], limit: int = 4) -> dict:
                 "category": _category(node["title"], node.get("productType")),
                 "tags": node.get("tags") or [],
                 "price_from": float(min(prices)) if prices else None,
+                **sale_summary(variants),
                 "about": _first_sentence(node.get("description")),
                 "image": product_image(node),
                 "url": product_url(node),
@@ -873,6 +1032,8 @@ async def build_outfit(items: str | list, budget: float | None = None) -> dict:
                 "option": None if variant["title"] == "Default Title" else variant["title"],
                 "sku": variant.get("sku") or None,
                 "unit_price": float(unit_price),
+                # This exact variant's "was" price, only when it is really reduced.
+                "was_price": _was_price(variant),
                 "quantity": quantity,
                 "line_total": float(line_total),
                 # The variant's own photo when it has one, so a pink shoe shows pink.
@@ -888,6 +1049,11 @@ async def build_outfit(items: str | list, budget: float | None = None) -> dict:
         "total": float(total),
         "problems": problems,
     }
+    gaps = look_gaps(chosen)
+    if gaps:
+        # "A jumper and plimsolls" was sent as a complete look. Said here, so the
+        # agent adds what is missing - or says the budget will not stretch to it.
+        result["missing"] = gaps
 
     if budget:
         allowance = _money(budget)

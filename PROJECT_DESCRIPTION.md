@@ -380,6 +380,7 @@ authoritative version.
 - [ ] Confirm custom domain, or record that myshopify is primary
 - [ ] Set the failed-lookup handoff threshold and rate limit
 - [ ] Test every ⚠️ link in this file and promote it to ✅
+- [ ] Replace the §12 size guide with the brand's own measurements and promote it to ✅
 
 ---
 
@@ -388,3 +389,173 @@ authoritative version.
 | Date | Change |
 |---|---|
 | 2026-09-02 | Initial document created |
+| 2026-09-29 | §12 size guide added (typical European children's sizes, ⚠️ general guide) |
+
+---
+
+## 12. Size guide
+
+⚠️ **General guide, not the brand's own chart.** These are typical European children's
+body measurements. The size names and the UK / US shoe conversions ✅ come from the store's
+own products; the heights, chests, waists, foot lengths and head sizes are standard values.
+Give them to shoppers as "as a general guide", never as the exact fit of one piece. Between
+two sizes, or for room to grow, suggest the larger. Every product page shows the chart for
+that piece under "Size guide", beneath the size buttons.
+
+The same tables are in the theme (`snippets/size-chart.liquid`) — change both together.
+
+### 12.1 Clothing sizes — tops, dresses, knitwear, coats and jackets
+
+⚠️ General guide - typical European children's sizes, not the brand's own chart.
+
+Measure the child's body, not the garment. Height decides first, then chest.
+
+| Size | Age | Height (cm) | Chest (cm) |
+|---|---|---|---|
+| 0M | Newborn | up to 50 | 39 |
+| 1M | 0-1 month | 51-56 | 41 |
+| 3M | 1-3 months | 57-62 | 43 |
+| 6M | 3-6 months | 63-68 | 45 |
+| 9M | 6-9 months | 69-74 | 47 |
+| 12M | 9-12 months | 75-80 | 49 |
+| 18M | 12-18 months | 81-86 | 51 |
+| 2Y | 2 years | 87-92 | 52 |
+| 3Y | 3 years | 93-98 | 54 |
+| 4Y | 4 years | 99-104 | 56 |
+| 5Y | 5 years | 105-110 | 58 |
+| 6Y | 6 years | 111-116 | 60 |
+| 7Y | 7 years | 117-122 | 62 |
+| 8Y | 8 years | 123-128 | 64 |
+| 9Y | 9 years | 129-134 | 67 |
+| 10Y | 10 years | 135-140 | 70 |
+| 12Y | 11-12 years | 141-152 | 76 |
+
+Example: a child 110 cm tall wears 5Y; at 111 cm or more, 6Y.
+
+### 12.2 Clothing sizes — trousers, shorts and skirts
+
+⚠️ General guide - typical European children's sizes, not the brand's own chart.
+
+Waist at the natural waistline, hip at the widest point.
+
+| Size | Age | Height (cm) | Waist (cm) | Hip (cm) |
+|---|---|---|---|---|
+| 6M | 3-6 months | 63-68 | 45 | - |
+| 9M | 6-9 months | 69-74 | 46 | - |
+| 12M | 9-12 months | 75-80 | 47 | - |
+| 18M | 12-18 months | 81-86 | 48 | - |
+| 2Y | 2 years | 87-92 | 50 | 54 |
+| 3Y | 3 years | 93-98 | 51 | 56 |
+| 4Y | 4 years | 99-104 | 52 | 58 |
+| 5Y | 5 years | 105-110 | 53 | 60 |
+| 6Y | 6 years | 111-116 | 54 | 62 |
+| 7Y | 7 years | 117-122 | 55 | 65 |
+| 8Y | 8 years | 123-128 | 57 | 68 |
+| 9Y | 9 years | 129-134 | 59 | 71 |
+| 10Y | 10 years | 135-140 | 61 | 74 |
+| 12Y | 11-12 years | 141-152 | 64 | 80 |
+
+### 12.3 Clothing sizes — rompers, bodysuits, sleepsuits and pyjamas
+
+⚠️ General guide - typical European children's sizes, not the brand's own chart.
+
+Go by height first: an all-in-one that is short in the body is uncomfortable.
+
+| Size | Age | Height (cm) | Chest (cm) | Weight (kg) |
+|---|---|---|---|---|
+| 0M | Newborn | up to 50 | 39 | up to 3.5 |
+| 1M | 0-1 month | 51-56 | 41 | 3.5-4.5 |
+| 3M | 1-3 months | 57-62 | 43 | 4.5-6 |
+| 6M | 3-6 months | 63-68 | 45 | 6-8 |
+| 9M | 6-9 months | 69-74 | 47 | 8-9 |
+| 12M | 9-12 months | 75-80 | 49 | 9-10.5 |
+| 18M | 12-18 months | 81-86 | 51 | 10.5-12 |
+| 2Y | 2 years | 87-92 | 52 | 12-14 |
+| 3Y | 3 years | 93-98 | 54 | 14-16 |
+| 4Y | 4 years | 99-104 | 56 | 16-18 |
+| 6Y | 6 years | 111-116 | 60 | 20-22 |
+| 8Y | 8 years | 123-128 | 64 | 25-28 |
+| 10Y | 10 years | 135-140 | 70 | 31-35 |
+
+### 12.4 Shoe sizes — shoes, boots and booties
+
+⚠️ General guide - typical European children's sizes, not the brand's own chart.
+
+Measure heel to longest toe with the child standing; choose the size whose foot length is
+just above it (about 1 cm of growing room). EU / UK / US ✅ are the store's own labels
+(EU 35-36 UK / US ⚠️ standard).
+
+| EU | UK | US | Foot length (cm) | Age |
+|---|---|---|---|---|
+| 20 | 4 | 5 | 12.0-12.5 | 12-18 months |
+| 21 | 4.5 | 5.5 | 12.6-13.1 | 18 months |
+| 22 | 5 | 6 | 13.2-13.8 | 2 years |
+| 23 | 6 | 7 | 13.9-14.5 | 2 years |
+| 24 | 7 | 8 | 14.6-15.1 | 2-3 years |
+| 25 | 8 | 9 | 15.2-15.8 | 3 years |
+| 26 | 8.5 | 9.5 | 15.9-16.5 | 3-4 years |
+| 27 | 9 | 10 | 16.6-17.1 | 4 years |
+| 28 | 10 | 11 | 17.2-17.8 | 4-5 years |
+| 29 | 11 | 12 | 17.9-18.5 | 5-6 years |
+| 30 | 12 | 13 | 18.6-19.1 | 6 years |
+| 31 | 12.5 | 13.5 | 19.2-19.8 | 6-7 years |
+| 32 | 13.5 | 1.5 | 19.9-20.5 | 7-8 years |
+| 33 | 1 | 2 | 20.6-21.1 | 8 years |
+| 34 | 2 | 2.5 | 21.2-21.8 | 9 years |
+| 35 | 2.5 | 3.5 | 21.9-22.5 | 9-10 years |
+| 36 | 3.5 | 4.5 | 22.6-23.1 | 10-11 years |
+
+### 12.5 Socks and tights
+
+⚠️ General guide - typical European children's sizes, not the brand's own chart.
+
+| Sock size | Fits shoe (EU) | Age |
+|---|---|---|
+| 0-3M | 15-16 | 0-3 months |
+| 3-6M | 16-17 | 3-6 months |
+| 6-12M | 17-19 | 6-12 months |
+| 12-24M | 20-22 | 1-2 years |
+| 18-24M | 21-22 | 18-24 months |
+| 2/4Y | 23-26 | 2-4 years |
+| 3/4Y | 24-26 | 3-4 years |
+| 4/6Y | 27-30 | 4-6 years |
+| 5/6Y | 28-30 | 5-6 years |
+| 6/8Y | 30-33 | 6-8 years |
+| 7/8Y | 31-33 | 7-8 years |
+| 8/10Y | 33-35 | 8-10 years |
+| 9/10Y | 34-35 | 9-10 years |
+
+### 12.6 Hats and bonnets
+
+⚠️ General guide - typical European children's sizes, not the brand's own chart.
+
+Measure around the head just above the ears and eyebrows. Bonnets tie to fit, so between
+sizes choose the larger.
+
+| Size | Head (cm) | Age |
+|---|---|---|
+| XS | 36-39 | 0-3 months |
+| XS/S | 36-42 | 0-6 months |
+| S | 40-42 | 3-6 months |
+| M | 43-46 | 6-12 months |
+| M/L | 43-49 | 6-24 months |
+| L | 47-49 | 12-24 months |
+
+### 12.7 Belts
+
+⚠️ General guide - typical European children's sizes, not the brand's own chart.
+
+Measure around the waist where the belt will sit, over clothes. Belt lengths ✅ are the
+store's own labels.
+
+| Size | Belt length (cm) | Fits waist (cm) | Age |
+|---|---|---|---|
+| S | 60 | 48-52 | 2-5 years |
+| M | 70 | 52-58 | 5-8 years |
+| L | 70 | 52-58 | 5-8 years |
+| XL | 80 | 58-64 | 8-12 years |
+
+### 12.8 One size and no chart
+
+Bibs, hairbands, sunglasses and teddy bears have no size chart: bibs and sunglasses carry
+their age range in the size or title (for example "0-6M", "9m-3y"); hairbands are one size.

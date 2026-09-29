@@ -101,12 +101,14 @@ async def run_executor(executor: AgentExecutor, message: str, history: ChatHisto
     return plain_dashes(result["output"])
 
 
-# Models reach for em and en dashes constantly; the store wants plain punctuation.
-_DASHES = str.maketrans({"—": "-", "–": "-"})
+# Models reach for em and en dashes, and semicolons, constantly. The store wants
+# plain punctuation: "Pink, 24200 INR; Anchor Jumper, 3800 INR; ..." reads like a
+# spreadsheet, not a person.
+_DASHES = str.maketrans({"—": "-", "–": "-", ";": ","})
 
 
 def plain_dashes(text: str) -> str:
-    """Replace em and en dashes with a plain hyphen."""
+    """Replace em and en dashes with a plain hyphen, and semicolons with commas."""
     return text.translate(_DASHES)
 
 

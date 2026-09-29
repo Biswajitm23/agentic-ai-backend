@@ -12,14 +12,18 @@ import re
 # Tools whose result a client can render as cards, and the key it arrives under.
 CARD_TOOLS = {
     "search_products": "products",
+    "get_product_details": "products",
     "browse_category": "products",
     "get_best_sellers": "products",
+    "get_sale_products": "products",
+    "get_new_arrivals": "products",
     "browse_catalogue": "products",
     "suggest_pieces": "products",
     "compare_products": "products",
     "recommend_for_me": "products",
     # What went into or came out of the bag - and only that - when a turn changed it.
     "add_to_cart": "products",
+    "add_look_to_cart": "products",
     "remove_from_cart": "products",
     "edit_cart": "products",
     "build_outfit": "outfit",
@@ -41,13 +45,16 @@ WHOLE_RESULT_TOOLS = {"browse_category"}
 # of change it is, and how the cards are headed.
 BAG_TOOLS = {
     "add_to_cart": ("added", "added", "Added to your bag"),
+    "add_look_to_cart": ("added", "added", "Added to your bag"),
     "remove_from_cart": ("removed", "removed", "Removed from your bag"),
     "edit_cart": ("changed", "edited", "Your bag was updated"),
 }
 
 # Tools whose products are never trimmed to the wording. A comparison is every
 # product in it, whichever of them the reply happens to name in full.
-FIXED_RESULT_TOOLS = {"compare_products", *BAG_TOOLS}
+# get_product_details too: "It's 100% wool" names no product, yet the card of
+# the piece asked about is exactly what belongs under it.
+FIXED_RESULT_TOOLS = {"compare_products", "get_product_details", *BAG_TOOLS}
 
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
@@ -83,6 +90,15 @@ _KINDS = {
 }
 
 
+# Colours, as stems. Replies name colours constantly - "in navy", "also in cream" -
+# and a title's colour word is never enough on its own to say which piece it is.
+_COLOURS = {
+    "white", "ivory", "cream", "beige", "camel", "brown", "tan", "black", "grey", "gray", "navy",
+    "blue", "sky", "teal", "green", "sage", "olive", "yellow", "gold", "orange", "red", "burgundy",
+    "pink", "rose", "raspberry", "dusty", "lilac", "purple", "silver", "multi",
+}
+
+
 def _money_forms(total) -> list[str]:
     """How a reply may write a total: "36300.00", "36,300.00", "36300"."""
     try:
@@ -101,7 +117,10 @@ def _stem(word: str) -> str:
 
 
 def _words(text: str) -> set[str]:
-    stems = (_stem(w) for w in _WORD_RE.findall(text.lower()) if len(w) > 2)
+    # Size ranges - "(3-10yrs)", "(6mths-3yrs)", "21EU" - say nothing about which
+    # piece this is, and nearly every title ends in one: a reply quoting two
+    # dresses' ranges drew a jumper and two cardigans that share "10yrs".
+    stems = (_stem(w) for w in _WORD_RE.findall(text.lower()) if len(w) > 2 and not w[0].isdigit())
     return {s for s in stems if s not in _NOISE}
 
 
@@ -136,6 +155,32 @@ def _names_other_piece(words: set[str], own: set[str], tokens: list[str]) -> boo
     return True
 
 
+_RANGE_RE = re.compile(r"\s*\([^)]*\)\s*$")
+_LOOSE_RE = re.compile(r"[^a-z0-9]+")
+
+
+def _plain(text: str) -> str:
+    """Lower case, punctuation and dashes as single spaces - for comparing names."""
+    return " " + _LOOSE_RE.sub(" ", (text or "").lower()).strip() + " "
+
+
+def _full_titles(items: list[dict], reply: str) -> tuple[list[dict], str]:
+    """The items whose whole title (size range aside) the reply writes out, and the
+    reply with those titles removed. Longest titles first, so "The Icon ... Dress"
+    is claimed before the plain "... Dress" inside it could be."""
+    text = _plain(reply)
+    found: list[dict] = []
+    by_length = sorted(items, key=lambda i: -len(i.get("title") or ""))
+    for item in by_length:
+        base = _plain(_RANGE_RE.sub("", item.get("title") or ""))
+        base = base.replace(" the ", " ", 1) if base.startswith(" the ") else base
+        if len(base.split()) < 2 or base not in text:
+            continue
+        found.append(item)
+        text = text.replace(base, " ", 1)
+    return found, text
+
+
 def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None) -> list[dict]:
     """The products the reply actually talks about.
 
@@ -149,7 +194,24 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
     the Mary Janes in beside it.
 
     ignore: stems in the reply that must not count as naming anything.
+
+    A title the reply writes out in full is taken first, for certain, and its
+    words are then struck from the reply: "The Icon Hand Smocked Peter Pan
+    Collar Short Sleeve Dress" otherwise lent every word but "Icon" to the plain
+    "Hand Smocked Peter Pan Collar Short Sleeve Dress" beside it, and to the
+    Peter Pan Collar Bodysuit. Only what is left is matched word by word.
     """
+    exact, rest = _full_titles(items, reply)
+    if exact:
+        others = [i for i in items if not any(i is e for e in exact)]
+        named = {id(e) for e in exact}
+        exact_words = [_words(e.get("title") or "") for e in exact]
+        # A shortened name for a further piece may still be in what remains -
+        # but never one whose words all belong to a title already written out.
+        loose = [i for i in keep_mentioned(others, rest, ignore) if not any(
+            _words(i.get("title") or "") <= w for w in exact_words)]
+        chosen = {id(i) for i in loose} | named
+        return [i for i in items if id(i) in chosen]
     said = _words(reply) - (ignore or set())
     tokens = _tokens(reply)
     title_words = [(item, _words(item.get("title") or "")) for item in items]
@@ -163,7 +225,13 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
     for item, words in title_words:
         if not words:
             continue
-        distinctive = {w for w in words if frequency.get(w, 1) == 1}
+        # A kind of piece never picks one out on its own: with one search result
+        # every word of its title is unique, and "we only dress babies" drew the
+        # Alice Floral Dress under a reply that named no product at all.
+        # A colour alone picks nothing out either: "they also come in White, Blue,
+        # Cream and Dusty Raspberry" drew the Cream Boy's Belt under a shoe answer.
+        distinctive = {w for w in words if frequency.get(w, 1) == 1 and w not in _KINDS
+                       and w not in _COLOURS}
         if distinctive:
             if distinctive & said and not _names_other_piece(words, distinctive & said, tokens):
                 kept.append(item)
@@ -171,8 +239,10 @@ def keep_mentioned(items: list[dict], reply: str, ignore: set[str] | None = None
             # Nothing sets this title apart, so fall back to how much of it appears -
             # counting what names this piece, not the kind of piece it is: "belt" in
             # "here's our brown belt" was half of "Cream Boy's Belt" and drew it too.
-            core = (words - _KINDS) or words
-            if len(core & said) / len(core) >= _MENTION_RATIO:
+            # Colours are not names either: a title that is only "Cream ... Belt"
+            # must be written out to be meant, which _full_titles catches.
+            core = words - _KINDS - _COLOURS
+            if core and len(core & said) / len(core) >= _MENTION_RATIO:
                 kept.append(item)
                 by_share.append(item)
     # A title that is only part of another one kept - "Catherine ... Dress" inside
@@ -239,6 +309,10 @@ def _card(item: dict) -> dict:
         "url": item.get("url"),
         # Only recommendations set this; it is why the product was suggested.
         "because": item.get("because"),
+        # A reduced piece: its "was" price and the saving, for a strike-through
+        # and a badge. Absent on anything at full price.
+        "compare_at_price": item.get("was_price_from") or item.get("was_price"),
+        "discount_percent": item.get("discount_percent"),
     }
 
 
@@ -413,7 +487,8 @@ class CardCollector:
                 result = json.loads(output or "{}")
                 # add_to_cart puts in what is chosen and asks about the rest; the
                 # others change nothing until every question is answered.
-                self.cart_waiting = (bool(result.get("needs_choice")) if tool_name == "add_to_cart"
+                self.cart_waiting = (bool(result.get("needs_choice"))
+                                     if tool_name in ("add_to_cart", "add_look_to_cart")
                                      else not result.get("done"))
                 self.cart_choice = result.get("needs_choice") or []
             except (TypeError, ValueError, AttributeError):
@@ -439,9 +514,21 @@ class CardCollector:
             return None
         name = CARD_TOOLS[tool_name]
         if name == "products":
+            whole = tool_name in WHOLE_RESULT_TOOLS
+            fixed = tool_name in FIXED_RESULT_TOOLS
+            earlier = self.products
+            if earlier and not fixed and not self.products_fixed and tool_name not in BAG_TOOLS:
+                # Two lookups in one turn - the jumper, then the chinos - are one
+                # answer: the second used to replace the first, and the reply
+                # named both while only the chinos had a card. Pooled here and
+                # still matched against the reply in finalise().
+                seen = {(i.get("product_id"), i.get("variant_id")) for i in earlier.get("items") or []}
+                extra = [i for i in cards["items"] if (i.get("product_id"), i.get("variant_id")) not in seen]
+                cards = {**cards, "items": [*(earlier.get("items") or []), *extra]}
+                whole = whole and self.products_whole
             # Set per result, so a later ordinary search still gets reconciled.
-            self.products_whole = tool_name in WHOLE_RESULT_TOOLS
-            self.products_fixed = tool_name in FIXED_RESULT_TOOLS
+            self.products_whole = whole
+            self.products_fixed = fixed
         if name == "outfit":
             self.outfits.append(cards)
         if tool_name in BAG_TOOLS:

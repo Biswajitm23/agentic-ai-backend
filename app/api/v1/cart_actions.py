@@ -301,6 +301,11 @@ def with_products(event: dict | None, changed: list[dict], bag: list[dict]) -> d
     word = event["action"]
     if word in (ADD_PREVIOUS, REMOVE_FROM_CART, EDIT_FROM_CART):
         products = [_product(c, c.get("change") or "added") for c in changed]
+        # What the bag gained leads, what it lost follows: "empty my bag, then add
+        # the look" showed three removed items and folded the look away behind
+        # "Show more".
+        order = {"added": 0, "edited": 1, "changed": 1, "removed": 2}
+        products.sort(key=lambda p: order.get(p.get("change"), 1))
     elif word == CHECKOUT:
         products = _checking_out(bag, [c for c in changed if c.get("change") == "added"])
     else:                                            # the bag as it stands

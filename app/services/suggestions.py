@@ -349,6 +349,38 @@ def product_chips(products: list[dict], then: str = "") -> list[dict]:
     return chips[:CHOICE_LIMIT]
 
 
+# The same rule the widget's splitOptions() applies: a trailing "1. ... 2. ..."
+# run, 2 to 8 lines, numbered 1..n, each up to 80 characters. The widget lifts
+# that list out of the text either way, so the choices must come back as chips -
+# or the shopper sees neither the list nor its options.
+_OPTION_LINE_RE = re.compile(r"^\s*(\d{1,2})[.)]\s+([^!\[].{0,79})$")
+_MARKDOWN_RE = re.compile(r"[*_`]+")
+
+
+def reply_options(reply: str) -> list[str]:
+    """The numbered choices the reply ends with, or [] when it ends with none."""
+    found: list[tuple[int, str]] = []
+    for line in reversed((reply or "").split("\n")):
+        if not line.strip():
+            continue
+        match = _OPTION_LINE_RE.match(line)
+        if not match:
+            break
+        found.insert(0, (int(match.group(1)), match.group(2).strip()))
+    if not 2 <= len(found) <= 8 or any(n != k + 1 for k, (n, _) in enumerate(found)):
+        return []
+    return [_MARKDOWN_RE.sub("", label).strip() for _, label in found]
+
+
+def reply_option_chips(reply: str, then: str = "") -> list[dict]:
+    """The agent's own offered choices as chips - they win over any row built here.
+
+    then: carried on, as the product chips do - " and checkout" when the choice
+    was asked on the way to paying.
+    """
+    return [{"label": label, "prompt": f"{label}{then}", "kind": "choice"} for label in reply_options(reply)]
+
+
 # Words that make an "option" a phrase of the question itself rather than an
 # answer: "would you like to see more or shall I show you shoes?" offers none.
 _QUESTION_WORDS = {"i", "you", "me", "shall", "should", "would", "could", "like", "want", "show", "let"}

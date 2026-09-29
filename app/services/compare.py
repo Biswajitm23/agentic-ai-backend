@@ -48,7 +48,7 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 _LI_RE = re.compile(r"<li[^>]*>(.*?)</li>", re.S | re.I)
 _TAG_RE = re.compile(r"<[^>]+>")
 _FABRIC_RE = re.compile(
-    r"\b(?:\d{1,3}%\s*)?(?:organic\s+)?(?:cotton|linen|wool|merino|alpaca|cashmere|silk|leather|"
+    r"\b(?:\d{1,3}%\s*)?(?:organic\s+)?(?:poly-?cotton|cotton|linen|wool|merino|alpaca|cashmere|silk|leather|"
     r"suede|polyester|viscose|corduroy|denim|jersey|muslin|velvet|tweed|voile|poplin)\b",
     re.I,
 )

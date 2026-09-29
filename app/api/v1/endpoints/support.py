@@ -30,7 +30,8 @@ from app.agent.customer_support_agent.shopper_context import (
 from app.api.v1 import cart_actions
 from app.api.v1.cards import CardCollector, keep_mentioned
 from app.services import shopify_storefront, shopper_identity as identity
-from app.services import cart_removal, shopper_words, shown_products, store_profile, suggestions
+from app.services import cart_removal, contact_guard, currency, pending_adds, reply_layout, shopper_words
+from app.services import shown_outfit, shown_products, store_profile, suggestions
 from app.services.shopify_client import ShopifyError
 from app.db.models import ChatMessage
 from app.db.session import AsyncSessionLocal
@@ -358,9 +359,15 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                                                  and colour the shopper chose - never
                                                  add the shown products on your own.
                                                  url: where to go afterwards
+      suggestions - {suggestions[], position}    answer chips, each {label, prompt}.
+                                                 position: "before_products" - the
+                                                 reply is asking, so draw the chips
+                                                 above its cards - or "after_products"
       done    - {"session_id", "reply",          the finished reply, repeating
                  products?, outfit?,             whatever cards were produced and
-                 greeting?, collections?,        the `actions` event
+                 greeting?, collections?,        the `actions` event; the chips'
+                 suggestions?,                   position rides along as
+                 suggestions_position?,          suggestions_position
                  actions?}
       error   - {"message"}                      the turn failed; nothing was saved
     """
@@ -377,6 +384,23 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
     if requested:
         ask = f"[They asked for exactly {requested} item(s): choose and name exactly {requested}, no more]"
         briefing = f"{briefing}\n\n{ask}" if briefing else ask
+    # The shop's own facts for this turn: its currency, and its one real contact
+    # address - read from Shopify, not left to the model to remember.
+    shop: dict = {}
+    if req.message.strip():
+        try:
+            shop = await shopify_storefront.shop_info()
+        except Exception:  # noqa: BLE001 - a missing note is a plainer answer, not a failure
+            logger.warning("Could not read the shop info", exc_info=True)
+    # "Under 150 pounds": converted here, so every tool gets a budget in the store
+    # currency and the agent knows to say the figure is approximate.
+    fx = currency.briefing(req.message, shop["currency"]) if shop.get("currency") else None
+    if fx:
+        briefing = f"{briefing}\n\n{fx}" if briefing else fx
+    contact_email = shop.get("contact_email")
+    contact = contact_guard.briefing(contact_email)
+    if contact:
+        briefing = f"{briefing}\n\n{contact}" if briefing else contact
     # "Checkout" with an empty bag means what this chat last showed them - the
     # brown belt they asked to see - or, if it showed nothing, that there is
     # nothing to check out. Told outright: the transcript only has the words.
@@ -472,11 +496,15 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             [line.model_dump() for line in req.cart.items] if req.cart is not None else None,
             req.cart.currency if req.cart is not None else None,
         )
+        marker = reply_layout.MarkerFilter()
         try:
             async for event in CUSTOMER_SUPPORT_AGENT.stream(with_context(req.message, briefing), history):
                 if event["type"] == "token":
-                    yield _sse("token", {"text": event["text"]})
+                    text = marker.feed(event["text"])
+                    if text:
+                        yield _sse("token", {"text": text})
                 elif event["type"] == "reset":
+                    marker.reset()
                     yield _sse("reset", {})
                 elif event["type"] == "tool":
                     yield _sse("tool", {"name": event["name"], "phase": event["phase"]})
@@ -485,6 +513,9 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                         cards.take(event["name"], event.get("output"))
                 elif event["type"] == "final":
                     reply = event["reply"]
+            tail = marker.flush()
+            if tail:
+                yield _sse("token", {"text": tail})
         except Exception:
             logger.exception("Support chat failed for session %s", session_id)
             yield _sse("error", {"message": "Sorry — something went wrong. Please try again."})
@@ -495,6 +526,18 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
             shopper_words.reset(words_token)
             cart_removal.reset(bag_token)
 
+        # The model's say on what leads under the reply, taken out of the words
+        # before anything reads them - the cards, the chips, the transcript.
+        reply, position = reply_layout.split(reply)
+        # An address the model made up is replaced with the store's real one before
+        # anyone reads it - the shopper's own addresses, from this chat, stay.
+        shopper_said = contact_guard.emails_in(
+            req.message, *(c for role, c in history if role == "user"),
+            req.customer.email if req.customer else None,
+        )
+        reply, invented = contact_guard.fix_reply(reply, contact_email, shopper_said)
+        if invented:
+            logger.warning("Replaced invented contact address(es) %s in session %s", invented, session_id)
         await _save_turn(session_id, req.message, reply)
         # Repeated in `done` so a client that only reads the final event still
         # gets the cards without having to follow the stream.
@@ -531,6 +574,14 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                 await shown_products.remember(session_id, cards.shown_products())
             except Exception:  # noqa: BLE001 - never fail a reply over the memory of it
                 logger.warning("Could not remember shown products for %s", session_id, exc_info=True)
+        if cards.outfit and not cards.bag_cards:
+            # The look this reply showed is the one a "yes" adds - and a new look
+            # replaces whatever an earlier one left waiting for a size.
+            try:
+                await shown_outfit.remember(session_id, cards.outfit)
+                await pending_adds.keep(session_id, [])
+            except Exception:  # noqa: BLE001 - never fail a reply over the memory of it
+                logger.warning("Could not remember the shown look for %s", session_id, exc_info=True)
 
         # Asked for a size or colour, the shopper taps the product's own options:
         # an exact value, so the next add_to_cart takes it without asking again.
@@ -548,6 +599,11 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
         if not chips and cards.collections_listed:
             # "Show me all your collections": every one of them, to tap.
             chips = suggestions.collection_chips(cards.collections_listed)
+        if not chips:
+            # The agent's own "1. Add it in 3Y  2. Find a 10Y dress": the widget
+            # lifts that list out of the text, so it has to come back as the
+            # buttons - ahead of any row this code would build in its place.
+            chips = suggestions.reply_option_chips(reply, then=then)
         if not chips and len(shown_earlier) > 1 and "?" in reply:
             # "Which one?" on the way to checkout: the products this chat showed,
             # and all of them at once.
@@ -567,8 +623,13 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                 # name: the one of those shown in this chat that the reply names.
                 shown_now = cards.shown_products() or await shown_products.recall(session_id)
                 meant = keep_mentioned(shown_now, reply)
-                chips = await suggestions.asked_option_chips(
-                    reply, then=then, fallback_title=meant[0]["title"] if len(meant) == 1 else None)
+                # "Which size would you like for it?" names nothing: then it is the
+                # one product on screen this turn, or the one they are looking at.
+                if len(meant) != 1 and len(cards.shown_products()) == 1:
+                    meant = cards.shown_products()
+                fallback = meant[0]["title"] if len(meant) == 1 else (
+                    req.context.viewing_product if req.context and req.context.viewing_product else None)
+                chips = await suggestions.asked_option_chips(reply, then=then, fallback_title=fallback)
             except Exception:  # noqa: BLE001 - never fail a reply over a chip row
                 logger.warning("Could not build option chips for session %s", session_id, exc_info=True)
                 chips = []
@@ -581,11 +642,14 @@ async def support_chat(req: SupportChatRequest) -> StreamingResponse:
                 logger.warning("Could not build suggestions for session %s", session_id, exc_info=True)
                 chips = []
         if chips:
-            yield _sse("suggestions", {"suggestions": chips})
+            yield _sse("suggestions", {"suggestions": chips, "position": position})
 
         done_payload = {"session_id": session_id, "reply": reply, **cards.as_dict()}
         if chips:
             done_payload["suggestions"] = chips
+        # Always: when no chips were built, the widget turns a numbered list in the
+        # reply into buttons of its own, and those belong in the same place.
+        done_payload["suggestions_position"] = position
         if cart_payload:
             done_payload["cart"] = cart_payload
         if actions:

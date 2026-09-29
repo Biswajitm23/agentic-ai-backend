@@ -16,7 +16,7 @@ from langchain_core.tools import tool
 
 from app.core.config import settings
 from app.db.session import AsyncSessionLocal
-from app.services import cart_removal, compare, handbook, order_changes, outfit, shopify_storefront, store_profile
+from app.services import cart_removal, compare, handbook, order_changes, outfit, product_details, shopify_storefront, store_profile
 from app.services import shopper_identity as identity
 from app.services.shopify_client import ShopifyError, store_domain
 
@@ -93,6 +93,34 @@ async def add_to_cart(items: list[dict], forget_others: bool = False, similar: s
         return json.dumps(await outfit.cart_additions(items, forget_others, similar), ensure_ascii=False)
     except (ShopifyError, KeyError, ValueError) as exc:
         return _fail("add_to_cart", exc)
+
+
+@tool
+async def add_look_to_cart() -> str:
+    """Add the complete look you showed the shopper - exactly that one - to their bag.
+
+    Use when they say yes to a look you presented ("yes please", "add the look",
+    "add these", "add it all") - also after emptying their bag for it: call
+    remove_from_cart first, then this, in the same turn. Takes no arguments: it
+    adds the look this chat last showed, in the sizes and colours shown with it -
+    they accepted those, so never ask for them again - and never call build_outfit
+    to add it: a rebuilt look can differ. Returns what add_to_cart returns: added,
+    problems (out of stock - say which). look lists the pieces it added.
+    found=false: no look was shown in this chat - build one first.
+    """
+    from app.services import shown_outfit
+    try:
+        look = await shown_outfit.recall(identity.current_session())
+        if not look or not look.get("cart_items"):
+            return json.dumps({"found": False, "reason": "no_look_shown",
+                               "tell_customer": "Let me put a look together for you first."})
+        # A new look replaces anything an earlier one left waiting - and its
+        # sizes and colours were shown with it and accepted, so none is re-asked.
+        result = await outfit.cart_additions(look["cart_items"], forget_others=True, confirmed=True)
+        result["look"] = [i.get("title") for i in look.get("items") or []]
+        return json.dumps(result, ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("add_look_to_cart", exc)
 
 
 @tool
@@ -262,19 +290,92 @@ async def get_best_sellers(limit: int = 5) -> str:
 
 
 @tool
+async def get_product_details(product: str) -> str:
+    """Everything the store says about ONE product: its description, fabric, care,
+    where it is made, colours, and which sizes are in stock or sold out.
+
+    Use for any question about a named piece that is not just its price: "what is
+    it made of", "is it machine washable", "is it warm / lined / stretchy", "where
+    is it made", "what's included", "which sizes are left in navy".
+    product: its name as the shopper gave it, or the title of the product they are
+    viewing when they say "this" or "it".
+    description, highlights, fabric, made_in and care are the store's own words:
+    answer from them first - what the piece is, its fabric, cut, and what it pairs
+    with all help ("a skirt made to pair with knitted tops - layer it for winter").
+    Never state a fact none of them gives (a fabric, lining, washing instruction);
+    only that one missing detail is "not listed", said after the useful answer.
+    found=false: offer its did_you_mean.
+    """
+    try:
+        return json.dumps(await product_details.product_details(product), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("get_product_details", exc)
+
+
+@tool
+async def get_new_arrivals(category: str = "", limit: int = 8) -> str:
+    """The newest pieces in the store, newest first and mixed across categories.
+
+    Use for "what's new", "new in", "new arrivals", "latest", "just arrived",
+    "anything new in dresses". category: who or what, in their words; empty for all.
+    limit: how many, 1-24; 8 is a good default.
+    Each product carries added_on (the date it was added). source "newest" means
+    nothing was added recently - call them our latest pieces, never "new this
+    week". all_same_day=true means the range arrived together - say "our latest
+    pieces" rather than naming a week. found=false with total_new above 0: none
+    in that category - offer categories_new.
+    """
+    try:
+        return json.dumps(await shopify_storefront.new_arrivals(category, limit), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("get_new_arrivals", exc)
+
+
+@tool
+async def get_sale_products(category: str = "", max_price: float = 0, limit: int = 8) -> str:
+    """What is on sale right now - pieces whose price is reduced from a "was" price.
+
+    Use for "is anything on sale", "any offers / discounts / deals", "sale
+    dresses", "anything reduced under 5000", "the biggest discount".
+    category: who or what, in their words ("dresses", "girls", "shoes"); empty for all.
+    max_price: the most they want to pay, in the store currency; 0 for no limit.
+    limit: how many to return, 1-24; 8 is a good default.
+    Each product carries sale_price_from, was_price_from and discount_percent
+    (the biggest saving on it); all_variants_on_sale=false means only some sizes
+    are reduced. found=false with total_on_sale=0: nothing is on sale at all - say
+    so plainly. found=false with total_on_sale above 0: the sale has other pieces -
+    say where, from categories_on_sale. Never promise a discount code or a sale
+    that is not in the result.
+    """
+    try:
+        return json.dumps(await shopify_storefront.sale_products(category, max_price, limit), ensure_ascii=False)
+    except (ShopifyError, KeyError, ValueError) as exc:
+        return _fail("get_sale_products", exc)
+
+
+@tool
 async def suggest_pieces(for_who: str = "", colour: str = "", occasion: str = "",
                          age: int = 0, budget: float = 0) -> str:
     """A few real pieces that fit what you know so far. Use on EVERY turn of an
     outfit, occasion or gift request - before you ask anything.
 
     Fill in only what the shopper has told you in this conversation and leave the
-    rest empty (age 0, budget 0). for_who: "boy", "girl" or "baby". colour: as they
-    said it, e.g. "navy". occasion: their words, e.g. "birthday party".
+    rest empty (age 0, budget 0). for_who: their words - "boy", "girl", "baby", "my
+    son", "my 10 year old child" - never guessed. colour: as they said it, e.g.
+    "navy". occasion: their words, e.g. "birthday party".
+    ask_first="for": they have not said boy or girl - show nothing yet; ask its
+    question warmly, as one short line, with "1. A boy" and "2. A girl" as the
+    choices, and call again with their answer.
     Returns up to 4 in-stock pieces, one per category, already filtered to suit
     them - name each with its price. colour_matched=false means nothing came in
     that colour: say so, and that these are the nearest. still_to_ask lists what
     is missing - ask for the FIRST one only. Once age and budget are known, build
     the whole look with build_outfit, using these handles.
+    Pass an adult or teen as they said it ("my wife", "20 year old woman") - never
+    rephrase it as "girl". out_of_range=true: we have nothing that fits them -
+    relay tell_customer, name largest_sizes, and offer to help find something for
+    a child instead; build nothing. size_note (reason "edge"): these come in our
+    largest size - say which, and that it depends on their height.
     """
     try:
         result = await outfit.suggest_pieces(for_who, colour, occasion, age or None, budget or None)
@@ -305,6 +406,9 @@ async def build_outfit(items: str | list, budget: float = 0) -> str:
     Omit color/size where the product has none. budget: 0 if not given.
     Returns total, within_budget, cart_items (variant ids for the storefront), and
     problems listing the colours/sizes that do exist so you can swap and retry.
+    missing: what the look still lacks to be wearable ("bottoms", "shoes", "top") -
+    add a piece for each and call again; if the budget cannot stretch to it, show
+    the look and say plainly what it still needs, never call it complete.
     """
     try:
         result = await outfit.build_outfit(items, budget or None)
@@ -542,12 +646,16 @@ async def confirm_order_change(
 
 CUSTOMER_SUPPORT_TOOLS = [
     search_products,
+    get_product_details,
     browse_category,
     list_collections,
     get_best_sellers,
+    get_new_arrivals,
+    get_sale_products,
     suggest_pieces,
     compare_products,
     add_to_cart,
+    add_look_to_cart,
     remove_from_cart,
     edit_cart,
     go_to_checkout,

@@ -49,6 +49,24 @@ class ShownProducts(Base):
     updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
 
 
+class ShownOutfit(Base):
+    """The complete look a support chat last put in front of the shopper.
+
+    "Shall I add the look to your bag?" - "Yes, please". On the yes the agent
+    used to price a look again, got a different one, and asked about a dress the
+    shopper had never been shown. The look they said yes to is kept here instead,
+    one per session, and add_look_to_cart adds exactly that.
+    """
+
+    __tablename__ = "chat_shown_outfit"
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    session_id: Mapped[str] = mapped_column(String(64), unique=True, index=True)
+    # {items: [{title, variant_id, option, ...}], cart_items: [{variant_id, quantity}], total, currency}
+    outfit: Mapped[dict] = mapped_column(JSON, default=dict)
+    updated_at: Mapped[datetime] = mapped_column(DateTime, server_default=func.now(), onupdate=func.now())
+
+
 class PendingAdds(Base):
     """Products a shopper asked to add that are still waiting on a size or colour.
 

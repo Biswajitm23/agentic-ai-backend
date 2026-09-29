@@ -91,6 +91,25 @@ class Settings(BaseSettings):
 
     # Categories are grouped from the live catalogue, which barely moves.
     SUPPORT_CATEGORY_CACHE_MINUTES: int = 30
+    # What is on sale (a compare-at price above the price) is found by scanning
+    # the catalogue, so it is cached - short, so a price change shows up soon.
+    SUPPORT_SALE_CACHE_MINUTES: int = 10
+
+    # "What's new?" - products created in this many days, newest first. Name a
+    # collection (by handle) to curate it instead: a bulk import dates a whole
+    # catalogue to one day, and then everything looks new.
+    SUPPORT_NEW_ARRIVALS_DAYS: int = 30
+    SUPPORT_NEW_ARRIVALS_COLLECTION: str = ""
+
+    # The store charges in one currency. A budget a shopper gives in another
+    # ("under 150 pounds") is converted with these approximate rates - units of
+    # SUPPORT_FX_BASE_CURRENCY per one unit of each - for sizing a budget only;
+    # the agent always says checkout is in the store's currency. Update now and
+    # then; a currency missing here makes the agent ask for the budget in INR.
+    SUPPORT_FX_BASE_CURRENCY: str = "INR"
+    SUPPORT_FX_RATES: dict[str, float] = {
+        "GBP": 112, "USD": 88, "EUR": 102, "AED": 24, "AUD": 58, "CAD": 64, "SGD": 68,
+    }
 
     # Shopify (New Shop)
     SHOPIFY_CLIENT_ID: str = ""
